@@ -1,0 +1,58 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OPENLAB",
+  "version": "0.1.0",
+  "identifier": "app.openlab.workbench",
+  "build": {
+    "frontendDist": "web",
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeDevCommand": "npm --prefix ../web run dev",
+    "beforeBuildCommand": "npm --prefix ../web run build && node scripts/sync-web.mjs"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "OPENLAB",
+        "width": 1440,
+        "height": 940,
+        "minWidth": 1080,
+        "minHeight": 700,
+        "resizable": true,
+        "center": true,
+        "decorations": true,
+        "theme": "Dark",
+        "backgroundColor": "#08090b",
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob: http://127.0.0.1:*; media-src 'self' data: blob: http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*; frame-src http://127.0.0.1:*; object-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis", "dmg", "app"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": ["resources/**/*"],
+    "shortDescription": "Local-first open-source project experience lab",
+    "longDescription": "OPENLAB imports a repository, analyses its real manifests, runs it in Docker, explores it with a real browser and writes an evidence-based experience report.",
+    "copyright": "MIT licensed",
+    "category": "DeveloperTool",
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "languages": ["English", "SimpChinese"]
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  },
+  "plugins": {}
+}

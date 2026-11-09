@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OPENLAB — 开源项目体验实验室</title>
+<meta name="description" content="OPENLAB 是一个本地优先的开源项目自动部署、真实体验、自动测试与素材采集工作台。导入 GitHub 仓库 → AI 分析 → Docker 部署 → 浏览器真实探索 → 截图录屏 → 生成体验报告。" />
+<meta property="og:title" content="OPENLAB — 开源项目体验实验室" />
+<meta property="og:description" content="导入仓库 → 分析技术栈 → Docker 部署 → Playwright 真实探索 → 截图录屏 → 体验报告。全部在本机运行。" />
+<meta property="og:image" content="./screenshots/overview.png" />
+<meta name="theme-color" content="#08090b" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d0f12'/%3E%3Cpath d='M13 7h6v7.5l5 9.5H8l5-9.5z' fill='%235b8cff'/%3E%3C/svg%3E" />
+<style>
+  :root {
+    --canvas: #08090b;
+    --surface: #0d0f12;
+    --panel: #111317;
+    --elevated: #15181d;
+    --hairline: #1e2126;
+    --hairline-strong: #282c33;
+    --ink: #e8eaed;
+    --muted: #9aa3ae;
+    --faint: #6b7480;
+    --accent: #5b8cff;
+    --ok: #3ecf8e;
+    --warn: #e0b341;
+    --danger: #e5654f;
+    --radius: 12px;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--canvas);
+    color: var(--ink);
+    font: 15px/1.7 "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Microsoft YaHei", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: #9dbcff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: "JetBrains Mono", "Cascadia Code", Consolas, ui-monospace, monospace; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---------- top bar ---------- */
+  header {
+    position: sticky; top: 0; z-index: 20;
+    border-bottom: 1px solid var(--hairline);
+    background: rgba(13, 15, 18, 0.82);
+    backdrop-filter: blur(12px);
+  }
+  .bar { display: flex; align-items: center; gap: 14px; height: 56px; }
+  .brand { display: flex; align-items: center; gap: 9px; font-weight: 650; letter-spacing: -0.01em; }
+  .mark {
+    width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center;
+    background: rgba(91, 140, 255, 0.14); border: 1px solid rgba(91, 140, 255, 0.4);
+  }
+  .mark svg { width: 15px; height: 15px; }
+  .bar nav { margin-left: auto; display: flex; align-items: center; gap: 18px; font-size: 13.5px; }
+  .bar nav a { color: var(--muted); }
+  .bar nav a:hover { color: var(--ink); text-decoration: none; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 7px;
+    height: 34px; padding: 0 14px; border-radius: 8px; font-size: 13.5px; font-weight: 550;
+    border: 1px solid var(--hairline-strong); background: var(--elevated); color: var(--ink);
+    transition: background 120ms, border-color 120ms, transform 120ms;
+  }
+  .btn:hover { background: #1a1e24; border-color: #333840; text-decoration: none; }
+  .btn.primary { background: var(--accent); border-color: #6f9aff; color: #fff; }
+  .btn.primary:hover { background: #4b7df0; }
+  .btn svg { width: 15px; height: 15px; }
+
+  /* ---------- hero ---------- */
+  .hero { padding: 78px 0 44px; text-align: center; position: relative; overflow: hidden; }
+  .hero::before {
+    content: ""; position: absolute; inset: -40% 20% auto; height: 460px;
+    background: radial-gradient(ellipse at center, rgba(91, 140, 255, 0.16), transparent 65%);
+    pointer-events: none;
+  }
+  .pill {
+    display: inline-flex; align-items: center; gap: 8px; font-size: 12px;
+    padding: 4px 11px; border-radius: 999px; border: 1px solid var(--hairline-strong);
+    background: var(--panel); color: var(--muted); margin-bottom: 22px;
+  }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  h1 {
+    font-size: clamp(34px, 5.2vw, 54px); line-height: 1.12; letter-spacing: -0.03em;
+    margin: 0 0 18px; font-weight: 700;
+  }
+  h1 .grad {
+    background: linear-gradient(100deg, #e8eaed 20%, #8fb2ff 60%, #5b8cff 90%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .lede { font-size: 17px; color: var(--muted); max-width: 680px; margin: 0 auto 12px; }
+  .lede-en { font-size: 13.5px; color: var(--faint); max-width: 640px; margin: 0 auto 30px; }
+  .cta { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-bottom: 46px; }
+
+  /* ---------- flow ---------- */
+  .flow {
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    flex-wrap: wrap; font-size: 12px; color: var(--faint); margin-bottom: 44px;
+  }
+  .flow span.step {
+    padding: 5px 11px; border-radius: 999px; border: 1px solid var(--hairline);
+    background: var(--panel); color: var(--muted); white-space: nowrap;
+  }
+  .flow span.arrow { color: var(--hairline-strong); }
+
+  /* ---------- screenshot ---------- */
+  .shot {
+    border: 1px solid var(--hairline-strong); border-radius: 14px; overflow: hidden;
+    background: var(--panel); box-shadow: 0 40px 90px -50px rgba(0, 0, 0, 0.95);
+  }
+  .shot .chrome {
+    display: flex; align-items: center; gap: 7px; height: 34px; padding: 0 12px;
+    border-bottom: 1px solid var(--hairline); background: var(--surface);
+  }
+  .shot .chrome i { width: 9px; height: 9px; border-radius: 50%; background: #2c323a; display: block; }
+  .shot .chrome .url {
+    margin-left: 8px; font-size: 11.5px; color: var(--faint);
+    font-family: "JetBrains Mono", Consolas, monospace;
+  }
+  .shot img { display: block; width: 100%; height: auto; }
+
+  /* ---------- sections ---------- */
+  section { padding: 66px 0; border-top: 1px solid var(--hairline); }
+  .kicker { font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); margin-bottom: 10px; }
+  h2 { font-size: 27px; letter-spacing: -0.02em; margin: 0 0 10px; font-weight: 650; }
+  .sub { color: var(--muted); margin: 0 0 30px; max-width: 720px; }
+
+  .grid { display: grid; gap: 14px; }
+  .grid.c2 { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+  .grid.c3 { grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
+  .card {
+    border: 1px solid var(--hairline); border-radius: var(--radius);
+    background: var(--panel); padding: 20px;
+  }
+  .card h3 { margin: 0 0 6px; font-size: 15px; font-weight: 620; }
+  .card p { margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.65; }
+  .card .ico {
+    width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center;
+    background: rgba(91, 140, 255, 0.1); border: 1px solid rgba(91, 140, 255, 0.22);
+    margin-bottom: 13px; color: #8fb2ff; font-size: 15px;
+  }
+
+  /* gallery */
+  .gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+  .gallery figure { margin: 0; border: 1px solid var(--hairline); border-radius: var(--radius); overflow: hidden; background: var(--panel); }
+  .gallery img { display: block; width: 100%; height: auto; }
+  .gallery figcaption {
+    padding: 9px 13px; font-size: 12px; color: var(--faint); border-top: 1px solid var(--hairline);
+    display: flex; justify-content: space-between; gap: 10px;
+  }
+  .gallery figcaption b { color: var(--muted); font-weight: 550; }
+
+  /* table */
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+  th { color: var(--faint); font-weight: 550; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+  td code, li code, p code { background: var(--elevated); padding: 1.5px 5px; border-radius: 5px; font-size: 12.5px; }
+
+  /* code block */
+  pre {
+    background: #07080a; border: 1px solid var(--hairline); border-radius: var(--radius);
+    padding: 16px 18px; overflow-x: auto; font-size: 12.5px; line-height: 1.75; color: var(--muted);
+    margin: 0;
+  }
+  pre .c { color: var(--faint); }
+  pre .k { color: #8fb2ff; }
+  pre .g { color: var(--ok); }
+
+  /* status chips */
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; }
+  .chip {
+    font-size: 11.5px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--hairline-strong); background: var(--elevated); color: var(--muted);
+  }
+  .chip.ok { border-color: rgba(62, 207, 142, 0.35); background: rgba(62, 207, 142, 0.1); color: var(--ok); }
+  .chip.warn { border-color: rgba(224, 179, 65, 0.35); background: rgba(224, 179, 65, 0.1); color: var(--warn); }
+  .chip.no { border-color: rgba(107, 116, 128, 0.35); color: var(--faint); }
+
+  /* footer */
+  footer { border-top: 1px solid var(--hairline); padding: 34px 0 48px; color: var(--faint); font-size: 13px; }
+  .foot { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between; }
+  .foot .links { display: flex; gap: 18px; }
+  .x-link { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
+  .x-link svg { width: 14px; height: 14px; }
+
+  .note {
+    border: 1px solid rgba(224, 179, 65, 0.28); background: rgba(224, 179, 65, 0.07);
+    border-radius: var(--radius); padding: 14px 16px; font-size: 13.5px; color: #e6cf94;
+  }
+  .note b { color: var(--warn); }
+
+  @media (max-width: 640px) {
+    .bar nav { display: none; }
+    .hero { padding-top: 52px; }
+    section { padding: 48px 0; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap bar">
+    <div class="brand">
+      <span class="mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#8fb2ff" stroke-width="2" stroke-linecap="round">
+          <path d="M9 3h6v6l4 10H5L9 9V3z" /><path d="M8 15h8" />
+        </svg>
+      </span>
+      OPENLAB
+    </div>
+    <nav>
+      <a href="#features">功能</a>
+      <a href="#gallery">界面</a>
+      <a href="#quickstart">快速开始</a>
+      <a href="#architecture">架构</a>
+      <a href="https://github.com/iiiiiiiiiiiiiKK/openlab" class="btn primary">
+        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="wrap hero">
+    <div class="pill"><span class="dot"></span> 本地优先 · 全部数据留在你自己的机器上</div>
+    <h1>把开源项目<br /><span class="grad">真正跑起来</span>，再写体验报告</h1>
+    <p class="lede">
+      导入一个 GitHub 仓库，OPENLAB 分析真实源码、生成运行方案、用 Docker 部署、
+      让浏览器真的点进去操作、采集截图与录屏，最后生成一份有据可查的体验报告。
+    </p>
+    <p class="lede-en">
+      Import → Analyse → Deploy → Explore → Capture → Report. Every claim in the report traces back
+      to a real container, a real HTTP response and a real browser session.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/iiiiiiiiiiiiiKK/openlab">查看源码</a>
+      <a class="btn" href="https://github.com/iiiiiiiiiiiiiKK/openlab#quick-start">快速开始</a>
+      <a class="btn" href="#gallery">看看界面</a>
+    </div>
+    <div class="flow">
+      <span class="step">GitHub / ZIP / 文件夹</span><span class="arrow">→</span>
+      <span class="step">源码分析</span><span class="arrow">→</span>
+      <span class="step">Docker 部署</span><span class="arrow">→</span>
+      <span class="step">HTTP 健康检查</span><span class="arrow">→</span>
+      <span class="step">Playwright 探索</span><span class="arrow">→</span>
+      <span class="step">截图 / 录屏 / GIF</span><span class="arrow">→</span>
+      <span class="step">体验报告</span>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <div class="shot">
+      <div class="chrome"><i></i><i></i><i></i><span class="url">127.0.0.1:3210 — 总览</span></div>
+      <img src="./screenshots/overview.png" alt="OPENLAB 总览页：项目统计、最近项目、任务队列、环境检测" loading="eager" />
+    </div>
+  </div>
+
+  <!-- ---------------------------------------------------------------- features -->
+  <section id="features">
+    <div class="wrap">
+      <p class="kicker">核心能力</p>
+      <h2>不是又一个 GitHub 导航站</h2>
+      <p class="sub">
+        确定性的活儿交给程序：下载、解包、装依赖、起容器、健康检查、截图、编码。
+        模型只负责两件事 —— 规划运行方案，以及在真实失败时生成最小修复补丁。
+      </p>
+      <div class="grid c3">
+        <div class="card">
+          <div class="ico">↓</div>
+          <h3>多来源导入</h3>
+          <p>公开 GitHub 链接、带 Token 的私有仓库、ZIP 上传、本地文件夹。解包前检查路径穿越、软链接、文件数与解压体积。</p>
+        </div>
+        <div class="card">
+          <div class="ico">◈</div>
+          <h3>基于真实文件的分析</h3>
+          <p>读取 package.json、各类 lock、pyproject、requirements、Dockerfile、compose、Makefile、Cargo、go.mod、.env.example、.nvmrc —— 每个结论都标注来源与置信度。</p>
+        </div>
+        <div class="card">
+          <div class="ico">▣</div>
+          <h3>默认安全的容器</h3>
+          <p>非 root（uid 10001）、cap_drop ALL、no-new-privileges、CPU/内存/PID 限额、不挂载主机目录、不暴露 Docker Socket、端口只绑 127.0.0.1。</p>
+        </div>
+        <div class="card">
+          <div class="ico">✓</div>
+          <h3>只有真实成功才算成功</h3>
+          <p>必须收到真实 HTTP 响应才会标记 <code>RUNNING</code>。缺 Docker、需要 GPU、缺 API Key、多服务栈 —— 一律如实报 <code>WAITING_FOR_USER</code>。</p>
+        </div>
+        <div class="card">
+          <div class="ico">⟳</div>
+          <h3>有上限的自动修复</h3>
+          <p>收集真实错误日志 → 定位相关文件 → 生成补丁写入隔离的 workspace → 只重试失败的那一步。默认最多 3 次，之后交还给你，补丁可查看可回滚。</p>
+        </div>
+        <div class="card">
+          <div class="ico">◎</div>
+          <h3>真实浏览器探索</h3>
+          <p>快速 / 深度 / 自定义三种模式，方案会对着真实 DOM 校验：未知动作、跨域跳转、不存在的选择器、危险操作（支付/删除/发布/退出）一律拒绝。</p>
+        </div>
+        <div class="card">
+          <div class="ico">▤</div>
+          <h3>素材中心</h3>
+          <p>多视口（桌面/平板/手机）、多比例（16:9 / 4:3 / 1:1 / 3:4）、整页截图、会话录屏、FFmpeg 生成 GIF 与 MP4，按项目归档，可批量导出。</p>
+        </div>
+        <div class="card">
+          <div class="ico">▦</div>
+          <h3>可追溯的报告</h3>
+          <p>Markdown / HTML / JSON 三格式，状态分为已验证、部分验证、未验证、失败、受阻。README 的宣传语永远不会被当成验证结论。</p>
+        </div>
+        <div class="card">
+          <div class="ico">◱</div>
+          <h3>自带 API，用量透明</h3>
+          <p>OpenAI / Anthropic / Gemini / DeepSeek / 任意兼容端点。密钥用本机主密钥加密，逐次记录 Token、延迟与估算费用，不认识的用量标为未知。</p>
+        </div>
+        <div class="card">
+          <div class="ico">◐</div>
+          <h3>中文优先的双语界面</h3>
+          <p>默认中文，右上角一键切英文，选择会持久化。511 个词条 / 1022 条译文，有测试守护：缺翻译、占位符不一致、英文混入中文都会让构建失败。</p>
+        </div>
+        <div class="card">
+          <div class="ico">⌘</div>
+          <h3>双模式交付</h3>
+          <p>Tauri 2 桌面应用，或者直接浏览器访问 <code>127.0.0.1:3210</code>。两种模式共用同一套后端、同一个数据库、同一个数据目录。</p>
+        </div>
+        <div class="card">
+          <div class="ico">↺</div>
+          <h3>能恢复的环境</h3>
+          <p>环境快照记录 compose、运行方案与变量名（绝不存值），一键恢复；删除项目时可保留素材与报告；重启后自动把失效的「运行中」状态纠正过来。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- gallery -->
+  <section id="gallery">
+    <div class="wrap">
+      <p class="kicker">界面</p>
+      <h2>截图由 OPENLAB 自己拍</h2>
+      <p class="sub">
+        下面每一张都是 Playwright 驱动真实浏览器在运行中的工作台上截的，不是设计稿。
+        重新生成：<code>python scripts/capture-ui-screenshots.py</code>
+      </p>
+      <div class="gallery">
+        <figure><img src="./screenshots/projects.png" alt="项目列表" loading="lazy" /><figcaption><b>项目</b><span>搜索 · 筛选 · 一键部署</span></figcaption></figure>
+        <figure><img src="./screenshots/workspace.png" alt="项目工作区" loading="lazy" /><figcaption><b>项目工作区</b><span>实时预览 + 多面板</span></figcaption></figure>
+        <figure><img src="./screenshots/running.png" alt="运行中" loading="lazy" /><figcaption><b>运行中</b><span>容器与任务队列</span></figcaption></figure>
+        <figure><img src="./screenshots/explorer.png" alt="AI 探索" loading="lazy" /><figcaption><b>AI 探索</b><span>方案校验与执行</span></figcaption></figure>
+        <figure><img src="./screenshots/assets.png" alt="素材" loading="lazy" /><figcaption><b>素材</b><span>截图 / 视频 / GIF</span></figcaption></figure>
+        <figure><img src="./screenshots/reports.png" alt="报告" loading="lazy" /><figcaption><b>报告</b><span>MD / HTML / JSON</span></figcaption></figure>
+        <figure><img src="./screenshots/providers.png" alt="模型服务" loading="lazy" /><figcaption><b>模型服务</b><span>自带密钥与用量</span></figcaption></figure>
+        <figure><img src="./screenshots/settings.png" alt="设置" loading="lazy" /><figcaption><b>设置</b><span>资源、网络、凭证</span></figcaption></figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- --------------------------------------------------------------- quickstart -->
+  <section id="quickstart">
+    <div class="wrap">
+      <p class="kicker">快速开始</p>
+      <h2>三行命令跑起来</h2>
+      <p class="sub">需要 Python 3.12+、Node 18+（只为构建前端）、Docker（部署项目时必需）、Playwright Chromium、FFmpeg。</p>
+      <div class="grid c2">
+        <div class="card">
+          <h3>Windows</h3>
+          <pre><span class="c"># 克隆并启动（自动建 venv、装依赖、装 Chromium、构建前端）</span>
+<span class="k">git clone</span> https://github.com/iiiiiiiiiiiiiKK/openlab
+<span class="k">cd</span> openlab
+<span class="k">powershell</span> -ExecutionPolicy Bypass -File .\scripts\openlab-start.ps1</pre>
+        </div>
+        <div class="card">
+          <h3>macOS / Linux</h3>
+          <pre><span class="c"># 同样的流程</span>
+<span class="k">git clone</span> https://github.com/iiiiiiiiiiiiiKK/openlab
+<span class="k">cd</span> openlab
+<span class="k">chmod</span> +x scripts/*.sh
+<span class="k">./scripts/openlab-start.sh</span></pre>
+        </div>
+      </div>
+      <div style="height:14px"></div>
+      <div class="card">
+        <h3>然后</h3>
+        <p style="margin-bottom:12px">打开 <code>http://127.0.0.1:3210</code> → 右上角「从 GitHub 导入」→ 粘贴仓库地址 → 在项目页点「部署」→ 看日志 → 在 AI 探索里跑一次真实操作 → 素材与报告自动生成。</p>
+        <div class="chips">
+          <span class="chip ok">导入</span>
+          <span class="chip ok">分析</span>
+          <span class="chip ok">部署</span>
+          <span class="chip ok">健康检查</span>
+          <span class="chip ok">探索</span>
+          <span class="chip ok">截图 / 录屏</span>
+          <span class="chip ok">报告</span>
+        </div>
+      </div>
+      <div style="height:14px"></div>
+      <div class="note">
+        <b>关于这个页面：</b>你正在看的是一个纯静态介绍页，托管在 GitHub Pages 上。
+        OPENLAB 本体<b>不能</b>跑在 GitHub Pages / Vercel / Cloudflare 这类静态或 Serverless 平台上 ——
+        它需要真实的 Docker 守护进程、本机 Chromium 与 FFmpeg，本质上是一个本地优先的桌面工具。
+        请按上面的步骤在本机运行。
+      </div>
+    </div>
+  </section>
+
+  <!-- -------------------------------------------------------------- architecture -->
+  <section id="architecture">
+    <div class="wrap">
+      <p class="kicker">架构</p>
+      <h2>四层，边界清晰</h2>
+      <p class="sub">
+        <code>engine/</code> 不依赖 FastAPI，可以脱离服务器单独测试；路由只做 HTTP，业务逻辑在 services 里；
+        前端所有请求走统一客户端。
+      </p>
+      <pre><span class="c">┌──────────────────────────────────────────────────────────────────┐</span>
+<span class="c">│</span> apps/web (React 18 + TS + Vite + Tailwind)      apps/desktop (Tauri 2)
+<span class="c">│</span>  · 9 个路由，多面板项目工作区                    · 负责拉起后端
+<span class="c">└───────────────────────────┬──────────────────────────────────────┘</span>
+                          <span class="c">│</span> HTTP + WebSocket (127.0.0.1:3210)
+<span class="c">┌───────────────────────────▼──────────────────────────────────────┐</span>
+<span class="c">│</span> apps/backend (FastAPI)
+<span class="c">│</span>  routers/   薄 HTTP 层
+<span class="c">│</span>  services/  编排：导入、部署、探索、报告
+<span class="c">│</span>  db.py      SQLAlchemy + SQL 迁移（SQLite / WAL）
+<span class="c">│</span>  events.py  进程内事件总线 → /ws/events
+<span class="c">└───────────────────────────┬──────────────────────────────────────┘</span>
+                          <span class="c">│</span> 普通 Python 导入（没有 HTTP）
+<span class="c">┌───────────────────────────▼──────────────────────────────────────┐</span>
+<span class="c">│</span> engine/（确定性，可单测）
+<span class="c">│</span>  core · project_importer · project_analyzer · docker_manager
+<span class="c">│</span>  task_scheduler · ai_agent · browser_automation
+<span class="c">│</span>  media_processor · asset_manager · report_generator · runtime
+<span class="c">└──────────────────────────────────────────────────────────────────┘</span></pre>
+      <div style="height:20px"></div>
+      <table>
+        <thead><tr><th>层 / 模块</th><th>职责</th><th>关键保证</th></tr></thead>
+        <tbody>
+          <tr><td><code>project_importer</code></td><td>URL 解析、GitHub API + codeload 下载、ZIP/TAR 安全解包</td><td>不需要本机安装 git</td></tr>
+          <tr><td><code>project_analyzer</code></td><td>扫描清单文件、推断技术栈、生成带证据的运行方案</td><td>不照搬模板，每个字段都标来源</td></tr>
+          <tr><td><code>docker_manager</code></td><td>CLI 封装、Dockerfile / compose 生成、策略守卫、健康检查</td><td>特权容器 / Socket / 主机挂载直接拒绝</td></tr>
+          <tr><td><code>task_scheduler</code></td><td>SQLite 持久化队列，取消 / 暂停 / 恢复 / 重试</td><td>重启后自动重新排队</td></tr>
+          <tr><td><code>ai_agent</code></td><td>三种接口格式适配、用量计费、补丁与修复循环</td><td>修复次数有上限，Diff 可回滚</td></tr>
+          <tr><td><code>browser_automation</code></td><td>Chromium 启动、DOM 检查、截图、方案生成与执行</td><td>危险动作黑名单（中英双语）</td></tr>
+          <tr><td><code>media_processor</code></td><td>FFmpeg 能力探测、转码、裁剪、封面、GIF</td><td>按真实能力选策略，缺能力返回 409 并说明</td></tr>
+          <tr><td><code>report_generator</code></td><td>MD / HTML / JSON 渲染与状态判定</td><td>只引用记录到的证据</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ----------------------------------------------------------------- honesty -->
+  <section>
+    <div class="wrap">
+      <p class="kicker">边界</p>
+      <h2>它做不到什么，也写在文档里</h2>
+      <p class="sub">一个只会报成功的工具没有价值。OPENLAB 在以下情况会明确停下来说明原因。</p>
+      <div class="grid c2">
+        <div class="card">
+          <h3>编译型 / 桌面项目</h3>
+          <p>Visual Studio 解决方案、Windows 壳扩展、CMake / Bazel 二进制、JVM 或 .NET 桌面应用会被识别为 <code>native</code>，部署返回具体原因（例如「检测到 .sln 解决方案」），不会假装跑通，也不会生成虚假的体验报告。</p>
+        </div>
+        <div class="card">
+          <h3>没有 Docker</h3>
+          <p>容器部署直接停在 <code>WAITING_FOR_USER</code> 并给出安装指引。可选开启「宿主机运行（无隔离）」，但界面、数据库字段与报告都会标注「未沙箱化」。</p>
+        </div>
+        <div class="card">
+          <h3>多服务栈</h3>
+          <p>compose + 数据库一类的项目，在没有 Docker 时会被拒绝，而不是只起一个 web 进程就说成功 —— 那样应用其实连不上数据库。</p>
+        </div>
+        <div class="card">
+          <h3>受限的 FFmpeg</h3>
+          <p>Playwright 自带的精简版只有 png + libvpx。WebM 可以，GIF 走「抽帧 + Pillow 合成」的兜底路径，MP4 会返回 409 并说明缺哪个编码器。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <div>
+      MIT Licensed · 用 Python + React + Docker + Playwright 构建
+    </div>
+    <div class="links">
+      <a href="https://github.com/iiiiiiiiiiiiiKK/openlab">GitHub</a>
+      <a href="https://github.com/iiiiiiiiiiiiiKK/openlab#readme">文档</a>
+      <a class="x-link" href="https://x.com/0xkillcoin" target="_blank" rel="noopener noreferrer">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+        0xkillcoin
+      </a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

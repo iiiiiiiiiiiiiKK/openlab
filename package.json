@@ -1,0 +1,28 @@
+{
+  "name": "openlab",
+  "private": true,
+  "version": "0.1.0",
+  "description": "OPENLAB \u2014 Open Source Project Experience Lab (local-first deployment, exploration and evidence workbench)",
+  "workspaces": [
+    "apps/web",
+    "apps/desktop",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "npm --prefix apps/web run dev",
+    "build:web": "npm --prefix apps/web run build",
+    "typecheck:web": "npm --prefix apps/web run typecheck",
+    "dev:desktop": "npm --prefix apps/desktop run tauri dev",
+    "build:desktop": "npm --prefix apps/desktop run tauri build",
+    "backend": "python -m openlab --open",
+    "backend:reload": "python -m openlab --reload",
+    "test": "python -m pytest tests/unit tests/integration -q",
+    "test:e2e": "python -m pytest tests/e2e -q",
+    "test:all": "python -m pytest -q",
+    "test:web": "npm --prefix apps/web run test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
