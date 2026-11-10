@@ -16,6 +16,12 @@ class StepAborted(RuntimeError):
     """Raised when a step cannot be completed safely."""
 
 
+# Actions that produce evidence on their own: the page really answered, or the
+# control really existed and accepted the interaction. Passive actions such as
+# wait/scroll/screenshot stay UNVERIFIED because they prove nothing.
+ASSERTING_ACTIONS = frozenset({"goto", "click", "fill", "press", "hover", "check", "select"})
+
+
 @dataclass
 class StepOutcome:
     index: int
@@ -28,6 +34,7 @@ class StepOutcome:
     duration_ms: int
     observation: str = ""
     error: str | None = None
+    http_status: int | None = None
     screenshot: CaptureResult | None = None
     console_errors: list[dict] = field(default_factory=list)
     network_errors: list[dict] = field(default_factory=list)
@@ -45,6 +52,7 @@ class StepOutcome:
             "duration_ms": self.duration_ms,
             "observation": self.observation,
             "error": self.error,
+            "http_status": self.http_status,
             "screenshot": self.screenshot.as_dict() if self.screenshot else None,
             "console_errors": self.console_errors[:10],
             "network_errors": self.network_errors[:10],
@@ -69,17 +77,29 @@ class ExplorationReport:
         return sum(1 for s in self.steps if s.status in ("VERIFIED", "PARTIALLY_VERIFIED"))
 
     @property
+    def verified_steps(self) -> int:
+        return sum(1 for s in self.steps if s.status == "VERIFIED")
+
+    @property
     def failed_steps(self) -> int:
         return sum(1 for s in self.steps if s.status == "FAILED")
 
     def status(self) -> str:
+        """Aggregate status from real step evidence.
+
+        A run is only VERIFIED when every step was itself VERIFIED against observed
+        evidence. A plan made of waits and page visits that never answered cannot be
+        promoted to VERIFIED just because nothing crashed.
+        """
         if not self.steps:
             return "UNVERIFIED"
-        if self.failed_steps == 0 and self.ok_steps == len(self.steps):
+        if self.failed_steps == 0 and self.ok_steps == len(self.steps) and self.verified_steps:
             return "VERIFIED"
         if self.ok_steps > 0:
             return "PARTIALLY_VERIFIED"
-        return "FAILED"
+        if self.failed_steps:
+            return "FAILED"
+        return "UNVERIFIED"
 
     def as_dict(self) -> dict:
         return {
@@ -139,6 +159,10 @@ async def execute_plan(
         collector = ConsoleCollector()
         collector.attach(page)
         for step in plan.steps:
+            # Console/network errors are attributed per step: remember how many were
+            # already recorded so step N does not inherit the errors of step N-1.
+            console_baseline = len(collector.messages)
+            network_baseline = len(collector.network_errors)
             outcome = await _run_step(
                 page=page,
                 step=step,
@@ -147,6 +171,8 @@ async def execute_plan(
                 screenshot_dir=Path(options.screenshot_dir),
                 viewport=options.viewport,
                 timeout_ms=options.step_timeout_ms,
+                console_baseline=console_baseline,
+                network_baseline=network_baseline,
             )
             report.steps.append(outcome)
             if on_step is not None:
@@ -175,19 +201,30 @@ async def _run_step(
     screenshot_dir: Path,
     viewport: str,
     timeout_ms: int,
+    console_baseline: int = 0,
+    network_baseline: int = 0,
 ) -> StepOutcome:
     started = time.monotonic()
     url = page.url
     title = ""
     observation = ""
     error: str | None = None
-    status = "VERIFIED"
+    # A step starts UNVERIFIED. It only earns a positive status after this run has
+    # observed evidence for it (an HTTP response in the 2xx/3xx range, a selector that
+    # was actually found, or a real assertion). Anything else -- a bare wait, a scroll,
+    # a screenshot -- cannot prove the feature works and must not claim that it does.
+    status = "UNVERIFIED"
+    http_status: int | None = None
     snapshot: PageSnapshot | None = None
     screenshot: CaptureResult | None = None
     try:
         if step.action == "goto":
             target = step.target or origin
-            await page.goto(target, wait_until="domcontentloaded", timeout=timeout_ms)
+            response = await page.goto(target, wait_until="domcontentloaded", timeout=timeout_ms)
+            if response is not None:
+                http_status = response.status
+                if http_status >= 400:
+                    raise StepAborted(f"the page answered HTTP {http_status}")
             try:
                 await page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 10_000))
             except Exception:  # noqa: BLE001 - SPA apps often never go idle
@@ -211,6 +248,14 @@ async def _run_step(
             await page.wait_for_timeout(250)
         elif step.action == "hover":
             await page.locator(step.target or "").first.hover(timeout=timeout_ms)
+        elif step.action == "check":
+            locator = page.locator(step.target or "").first
+            await locator.wait_for(state="visible", timeout=timeout_ms)
+            await locator.check(timeout=timeout_ms)
+        elif step.action == "select":
+            locator = page.locator(step.target or "").first
+            await locator.wait_for(state="visible", timeout=timeout_ms)
+            await locator.select_option(step.value or "", timeout=timeout_ms)
         elif step.action == "wait":
             await page.wait_for_timeout(step.wait_ms or int(step.value or 1000))
         elif step.action == "screenshot":
@@ -222,9 +267,16 @@ async def _run_step(
         title = await page.title()
         snapshot = await inspect_page(page)
         observation = f"{title or '(untitled)'} — {snapshot.text_length} chars of text"
-        if collector.console_errors:
-            status = "PARTIALLY_VERIFIED"
-            observation += f"; {len(collector.console_errors)} console error(s)"
+        if http_status is not None:
+            observation += f" (HTTP {http_status})"
+        # Evidence rules: only actions that actually changed or proved something can
+        # be VERIFIED. Passive steps stay UNVERIFIED by design.
+        step_console_errors = collector.console_errors_since(console_baseline)
+        if step.action in ASSERTING_ACTIONS:
+            status = "PARTIALLY_VERIFIED" if step_console_errors else "VERIFIED"
+        if step_console_errors:
+            status = "PARTIALLY_VERIFIED" if status == "VERIFIED" else status
+            observation += f"; {len(step_console_errors)} console error(s)"
         if step.capture:
             screenshot = await capture(
                 page,
@@ -253,9 +305,10 @@ async def _run_step(
         duration_ms=duration,
         observation=observation,
         error=error,
+        http_status=http_status,
         screenshot=screenshot,
-        console_errors=collector.console_errors[-10:],
-        network_errors=collector.network_errors[-10:],
+        console_errors=collector.console_errors_since(console_baseline)[-10:],
+        network_errors=collector.network_errors[network_baseline:][-10:],
         features=snapshot.feature_hints() if snapshot else [],
     )
 

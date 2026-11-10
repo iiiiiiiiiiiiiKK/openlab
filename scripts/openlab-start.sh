@@ -80,7 +80,9 @@ step "Ensuring Playwright Chromium is available"
 export PLAYWRIGHT_BROWSERS_PATH="$ROOT/.browsers"
 mkdir -p "$PLAYWRIGHT_BROWSERS_PATH" "$ROOT/.tmp"
 export TMPDIR="$ROOT/.tmp"
-"$VENV_PY" -m playwright install chromium >/dev/null 2>&1 || warn "Chromium install failed; preview/screenshots will be unavailable."
+# Playwright needs its own ffmpeg build for video recording; without it a recorded
+# page creation aborts the whole browser session, not just the recording.
+"$VENV_PY" -m playwright install chromium ffmpeg >/dev/null 2>&1 || warn "Browser install failed; preview/screenshots/recording will be unavailable."
 
 # ---------------------------------------------------------------------------
 # 4. Web UI

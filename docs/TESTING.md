@@ -3,6 +3,18 @@
 OPENLAB tests must produce **real** evidence. Mocking Docker, the browser or FFmpeg to claim success
 is explicitly forbidden — environment-dependent tests skip with a reason instead.
 
+## Browser prerequisites
+
+```bash
+python -m playwright install chromium ffmpeg
+```
+
+Both are required. Playwright validates its own ffmpeg build when a *recorded* page is
+created; if the recorded revision is not installed the driver drops the whole session
+("Executable doesn't exist at .../ffmpeg-XXXX/ffmpeg-win64.exe"), not just the video.
+`engine/browser_automation.launcher.video_recording_available()` detects this up front and
+OPENLAB degrades to a recording-free session instead of failing.
+
 ## Running the suites
 
 ```bash
@@ -37,6 +49,7 @@ pytest tests/e2e/test_real_loop.py::test_full_loop_import_deploy_preview_explore
 | `test_host_runtime.py` | reserved-port probing, port-flag injection, real process start/stop, state recovery from disk |
 | `test_media_capabilities.py` | ffmpeg listing parsing, GIF strategy ladder (palette → frames+Pillow → 409), MP4 capability gating |
 | `test_lifecycle_helpers.py` | preservation manifests, report-only/asset-only bundles, restore/delete error paths |
+| `test_audit_regressions.py` | one test per real defect: compose build context, container-name uniqueness, "no evidence means no VERIFIED", diff context mismatch, patch rollback, paused-task execution, worker survival after cancel, `NO_PROXY` sanitising, budget consumption |
 
 ### `apps/web` (Vitest)
 

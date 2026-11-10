@@ -67,14 +67,32 @@ class _UniqueKeySafeLoader(yaml.SafeLoader):
         return mapping
 
 
-def container_name_for(project_name: str, service: str = "app") -> str:
-    slug = re.sub(r"[^a-z0-9_-]+", "-", project_name.lower()).strip("-")[:40] or "project"
+def _slug_token(value: str, width: int = 40) -> str:
+    return re.sub(r"[^a-z0-9_-]+", "-", (value or "").lower()).strip("-")[:width] or "project"
+
+
+def container_name_for(
+    project_name: str, service: str = "app", project_key: str | None = None
+) -> str:
+    """Container name for one service.
+
+    When ``project_key`` is supplied (OPENLAB passes the project id) the name is
+    unique per project. Two imports of the same repository otherwise produced the
+    same slug, and the second deployment tore down the first one.
+    """
+    if project_key:
+        slug = f"{_slug_token(project_name, 32)}-{_slug_token(project_key, 8)}"
+    else:
+        slug = _slug_token(project_name, 40)
     suffix = "" if service in ("app", "web", "main") else f"-{service}"
     return f"openlab-{slug}{suffix}"
 
 
-def network_name_for(project_name: str) -> str:
-    slug = re.sub(r"[^a-z0-9_-]+", "-", project_name.lower()).strip("-")[:40] or "project"
+def network_name_for(project_name: str, project_key: str | None = None) -> str:
+    if project_key:
+        slug = f"{_slug_token(project_name, 32)}-{_slug_token(project_key, 8)}"
+    else:
+        slug = _slug_token(project_name, 40)
     return f"openlab-net-{slug}"
 
 
@@ -156,10 +174,17 @@ def generate_compose(
     allow_network: bool = False,
     dockerfile: str = "Dockerfile",
     extra_services: list[dict] | None = None,
+    build_context: str = "../workspace",
+    project_key: str | None = None,
 ) -> str:
-    """Render a compose file with resource limits and no host mounts."""
-    name = container_name_for(plan.project_name)
-    net = network_name_for(plan.project_name)
+    """Render a compose file with resource limits and no host mounts.
+
+    The build context must point at the project workspace copy, not at the project
+    directory: the compose file lives in <project>/docker, so ".." would build the
+    folder that also contains source/, screenshots/ and the previous build output.
+    """
+    name = container_name_for(plan.project_name, project_key=project_key)
+    net = network_name_for(plan.project_name, project_key=project_key)
     env_lines: list[str] = []
     for var in plan.env_vars:
         key = str(var.get("name") or "")
@@ -175,8 +200,8 @@ def generate_compose(
     services: list[str] = []
     app_service = [
         "  app:",
-        f"    build:",
-        f"      context: ..",
+        "    build:",
+        f"      context: {build_context}",
         f"      dockerfile: docker/{dockerfile}",
         f"    image: {image_tag}",
         f"    container_name: {name}",
@@ -205,7 +230,7 @@ def generate_compose(
             "    read_only: false",
             "    tmpfs:",
             "      - /tmp:size=256M",
-            f"    networks:",
+            "    networks:",
             f"      - {net}",
         ]
     )
@@ -217,7 +242,7 @@ def generate_compose(
         svc = [
             f"  {service['name']}:",
             f"    image: {service['image']}",
-            f"    container_name: {container_name_for(plan.project_name, service['name'])}",
+            f"    container_name: {container_name_for(plan.project_name, service['name'], project_key=project_key)}",
             "    restart: \"no\"",
             "    deploy:",
             "      resources:",
@@ -544,7 +569,7 @@ SERVICE_IMAGES = {
 }
 
 
-def required_service_containers(plan: RunPlan) -> list[dict]:
+def required_service_containers(plan: RunPlan, project_key: str | None = None) -> list[dict]:
     out: list[dict] = []
     for service in plan.services:
         image = SERVICE_IMAGES.get(service.name)

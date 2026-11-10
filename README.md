@@ -15,10 +15,10 @@
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](apps/desktop)
 [![Playwright](https://img.shields.io/badge/Playwright-1.49-2EAD33?logo=playwright&logoColor=white)](engine/browser_automation)
 [![Docker](https://img.shields.io/badge/Docker-isolated-2496ED?logo=docker&logoColor=white)](engine/docker_manager)
-[![Tests](https://img.shields.io/badge/tests-192%20passing-3ecf8e.svg)](#测试)
+[![Tests](https://img.shields.io/badge/tests-206%20passing-3ecf8e.svg)](#测试)
 [![UI](https://img.shields.io/badge/UI-%E4%B8%AD%E6%96%87%20%2F%20English-e0b341.svg)](#界面语言)
 
-**[功能](#功能) · [界面](#界面) · [快速开始](#快速开始) · [架构](#架构) · [测试](#测试) · [FAQ](#faq)**
+**[功能](#功能) · [界面](#界面) · [快速开始](#快速开始) · [架构](#架构) · [v0.1.1 修复](#v011-修复了什么) · [测试](#测试) · [FAQ](#faq)**
 
 作者 [**0xkillcoin**](https://x.com/0xkillcoin) · [𝕏](https://x.com/0xkillcoin)
 
@@ -422,6 +422,66 @@ OPENLAB_DATA/
 
 ---
 
+## v0.1.1 修复了什么
+
+这一版是一次"证据完整性 + 可用性"的整改。因为 OPENLAB 的卖点是 **所有结论背后都有真实证据**，所以下面这些缺陷属于产品红线，不是小修小补。
+
+### 会弄坏真实数据
+
+| 缺陷 | 修复 |
+| --- | --- |
+| 生成的 compose 用 `build.context: ..`，让 Docker 去构建**项目根目录**（里面有 `source/`、`screenshots/`、上次的构建产物），`COPY . /app` 根本拿不到应用代码 | 改成指向 `workspace/`，由 `deploy._build_context_relpath()` 计算相对路径 |
+| AI 修复只把源文件**截到 12000 字符**发给模型，却要求它"返回完整文件内容"，结果把真实源码截断写回 | 超过 `MAX_EDITABLE_FILE_BYTES` 的文件直接跳过，绝不截断 |
+| 统一 diff 的上下文行不做比对，直接把该位置覆盖掉，上下文对不上的补丁也"应用成功"并写坏文件 | 上下文行严格比对，不匹配抛 `PatchError` |
+| `apply_patch` 逐个文件写，中途失败时已写的文件不回滚，下一轮在残缺代码树上继续改 | 全有或全无，失败自动回滚 |
+| 删除项目时对 `data_dir` 字段直接 `rmtree`，没有任何包含性校验 | 只允许删 `OPENLAB_DATA/projects/` 之下的路径 |
+| 同名项目共用容器/网络名，导入同一个仓库两次后，部署 B 会把 A 的容器拆掉 | 容器名与网络名带上项目 id |
+
+### 会编造结果（触碰产品红线）
+
+| 缺陷 | 修复 |
+| --- | --- |
+| 探索步骤的初始状态就是 `VERIFIED`，`goto` 丢掉 HTTP 响应 —— 404 页面和空 `wait` 都会被报成"已验证体验" | 初始 `UNVERIFIED`，只有 `goto`/`click`/`fill`/`press`/`hover`/`check`/`select` 能升级状态，`goto` 遇到 ≥400 直接 `FAILED` |
+| 全是被动步骤的探索也能汇总成 `VERIFIED` | 至少要有一个真正 `VERIFIED` 的步骤才可能汇总为 `VERIFIED` |
+| 控制台/网络错误跨步骤累积，第 N 步继承了前 N-1 步的错误 | 按步骤边界归属（`console_errors_since`） |
+| 报告仅凭 `RUNNING` 标志就写"HTTP 健康检查通过（状态 200）" | 状态码当场探测；探测不到就如实写"启动后未响应探测" |
+| `.md`、`.html`、`.json` 各自重算 payload，可能互相矛盾 | 三份产物共用同一份 payload |
+
+### 会崩溃或卡死
+
+| 缺陷 | 修复 |
+| --- | --- |
+| 系统里 `NO_PROXY` 含 `[::1]` 时，`httpx` 构造客户端就抛 `InvalidURL` —— GitHub 导入和所有模型调用全挂 | 新增 `engine/core/http.py`，统一净化并作为唯一客户端出口 |
+| Playwright 找不到与版本匹配的 ffmpeg，创建录制页面时把整个浏览器会话打断 | 启动前探测；不可用时降级为无录屏并记录原因 |
+| 无条件把 `PLAYWRIGHT_BROWSERS_PATH` 指向数据目录（即使里面是空的），把可用的全局安装屏蔽掉 | 只有数据目录里真有 Chromium 时才接管 |
+| 浏览器启动失败会泄漏一个 Chromium + driver 进程（`__aenter__` 抛错时 `__aexit__` 不会执行） | `__aenter__` 失败即清理，`__aexit__` 幂等 |
+| 用量/设置接口每次都新建 `AIClient` 且从不关闭 Session，连接池耗尽后整个 API 卡死 | 调用方一律 `try/finally: session.close()` |
+| `Budget.consume()` 全仓无调用，请求数/Token/美元三道上限形同虚设 | `client.complete()` / `complete_json()` 接收并消费 budget |
+| 模型回复不是合法 JSON 时抛 `ValueError`，直接崩掉部署任务 | 包装成 `ProviderError`，按普通修复失败处理 |
+| 每一行输出都单独 commit 一次日志，长构建把事件循环按在 SQLite 写锁上 | 日志按批提交 |
+
+### 任务调度语义
+
+| 缺陷 | 修复 |
+| --- | --- |
+| 排队中被 pause 的任务，被 worker 取出后照样执行 | `_run` 跳过 `paused` |
+| 对 paused 任务 cancel 只置标志位，状态永远停在 paused | queued/paused/waiting 直接取消 |
+| cancel 取消的是 **worker 自身**（它被登记在 `_running` 里），后续所有排队任务卡死 | 每个任务跑在独立子任务里，worker 继续消费队列 |
+| 取消处理器会覆盖 `resume()` 刚写回的 queued 状态，任务永久卡住 | 只降级仍处于 `running` 的行 |
+| `resume()` 可能把同一个任务入队两次 | 入队去重 |
+| `max_parallel_deployments` 只改配置不改 worker 数量 | 新增 `scheduler.set_concurrency()` |
+
+### 设置与生命周期
+
+| 缺陷 | 修复 |
+| --- | --- |
+| UI 改的设置只写进 `app_settings` 从不回读，重启后静默恢复默认 | 启动时 `_apply_persisted_settings()` 回填 |
+| `STARTING` 到 `RUNNING`、`PENDING` 到 `PREPARING` 被判非法并静默强制写入 | 补进状态机；非法流转改为记日志而不是吞掉 |
+
+每一类都补了回归用例，见 [`tests/unit/test_audit_regressions.py`](tests/unit/test_audit_regressions.py)。
+
+---
+
 ## 测试
 
 ```bash
@@ -433,13 +493,27 @@ cd apps/web && npm test         # 前端：翻译目录与告警映射
 
 **测试必须产出真凭实据。** 用 mock 冒充 Docker、浏览器或 FFmpeg 是明确禁止的 —— 依赖环境的用例会**带原因跳过**，而不是假装通过。
 
-本机（Windows Server 2022，无 Docker、无 Rust）实测：
+### 证据链的判定规则（v0.1.1 起）
+
+浏览器探索的每一步都从 `UNVERIFIED` 开始，只有真正拿到证据才能升格：
+
+| 动作 | 能得到的证据 | 最高状态 |
+| --- | --- | --- |
+| `goto` | 真实 HTTP 响应（4xx/5xx 直接判 `FAILED`） | `VERIFIED` |
+| `click` / `fill` / `press` / `hover` / `check` / `select` | 控件真实存在并接受了交互 | `VERIFIED` |
+| `wait` / `scroll` / `screenshot` | 什么都没证明 | `UNVERIFIED` |
+
+控制台错误按**步骤边界**归属：第 N 步不会继承第 N−1 步的错误。整轮探索只有在每一步都是 `VERIFIED` 时才汇总为 `VERIFIED`，否则最多 `PARTIALLY_VERIFIED`，有失败步骤时为 `FAILED`。
+
+报告里的 HTTP 状态码同样是**当场探测**出来的，不是从 `RUNNING` 状态推断的 —— 探测不到就写「启动后未响应探测」，不会编一个 `200`。
+
+本机（Windows 10，无 Docker、无 Rust）实测全部三条命令：
 
 ```
-pytest tests/unit        →  141 passed, 2 skipped
-pytest tests/integration →   30 passed
-pytest tests/e2e         →    6 passed, 2 skipped
-apps/web npm test        →   15 passed
+pytest tests/unit tests/integration → 191 passed, 1 skipped
+pytest tests/e2e                    →   6 passed, 2 skipped
+pytest（全量）                       → 206 passed, 5 skipped
+apps/web npm test                   →  15 passed
 ```
 
 跳过原因会打印出来，例如：
@@ -521,7 +595,7 @@ PowerShell 默认禁止未签名脚本。用 `powershell -ExecutionPolicy Bypass
 <details>
 <summary><b>提示无法启动 Chromium？</b></summary>
 
-运行 `python -m playwright install chromium`。如果账户对 `%TEMP%` 没有写权限，把 `OPENLAB_DATA_DIR` 指到可写目录 —— OPENLAB 会自动把浏览器工件目录放进数据目录。
+运行 `python -m playwright install chromium ffmpeg`。两个都要装：Playwright 在创建「录制中」的页面时会校验它自己的 ffmpeg 构建，缺了会让整个浏览器会话断开（不只是录不到视频）。OPENLAB 会在启动前探测并降级为无录屏模式，同时在任务日志里写明原因。如果账户对 `%TEMP%` 没有写权限，把 `OPENLAB_DATA_DIR` 指到可写目录 —— OPENLAB 会自动把浏览器工件目录放进数据目录。
 </details>
 
 <details>

@@ -74,6 +74,8 @@ class AssetManager:
     def __init__(self, session: Session, layout: DataLayout) -> None:
         self.session = session
         self.layout = layout
+        # Set when delete_asset() removed the row but could not unlink the file.
+        self.last_delete_warning: str | None = None
 
     # -- registration ----------------------------------------------------
     def register_file(
@@ -160,7 +162,9 @@ class AssetManager:
             try:
                 self.absolute_path(asset).unlink(missing_ok=True)
             except (OSError, UnsafePath):
-                pass
+                # The row is still removed, but the caller and the UI are told the file
+                # may have survived instead of claiming a clean delete.
+                self.last_delete_warning = "the asset file could not be removed from disk"
         project_id = asset.project_id
         self.session.delete(asset)
         self.session.commit()
@@ -189,12 +193,31 @@ class AssetManager:
         return destination
 
     def bulk_export(self, asset_ids: list[str], target_dir: Path) -> list[Path]:
+        """Copy several assets into ``target_dir`` without silently overwriting.
+
+        Two assets can legitimately share a filename (``preview-desktop.png`` exists in
+        many projects), so a collision gets a numeric suffix instead of replacing the
+        previous file.
+        """
         written: list[Path] = []
         for asset_id in asset_ids:
             try:
-                written.append(self.export_asset(asset_id, target_dir))
-            except AssetError:
+                destination = self.export_asset(asset_id, target_dir)
+            except (AssetError, OSError):
                 continue
+            counter = 1
+            unique = destination
+            while unique in written:
+                unique = destination.with_name(
+                    f"{destination.stem}-{counter}{destination.suffix}"
+                )
+                counter += 1
+            if unique != destination:
+                try:
+                    shutil.copy2(destination, unique)
+                except OSError:
+                    continue
+            written.append(unique)
         return written
 
     def storage_stats(self, project_id: str | None = None) -> dict:

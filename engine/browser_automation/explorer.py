@@ -268,7 +268,6 @@ def validate_model_plan(data: dict, snapshot: PageSnapshot, origin: str, mode: s
     raw_steps = data.get("steps") or []
     if not isinstance(raw_steps, list) or not raw_steps:
         raise PlanRejected("model returned no steps")
-    allowed_targets = {origin}
     allowed_selectors = {
         item.get("selector") for item in (snapshot.nav + snapshot.buttons + snapshot.inputs) if item.get("selector")
     }

@@ -13,7 +13,6 @@ These tests are honest about the environment:
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import socket
 import subprocess

@@ -75,6 +75,8 @@ class TaskScheduler:
         self._stopping = False
         self._seq: dict[str, int] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Task ids currently waiting in the in-memory queue (dedup for resume()).
+        self._queued_ids: set[str] = set()
 
     # -- registration ----------------------------------------------------
     def register(self, kind: str, handler: TaskHandler) -> None:
@@ -93,6 +95,29 @@ class TaskScheduler:
         await self.requeue_pending()
         log.info("scheduler started with %d worker(s)", len(self._workers))
 
+    async def set_concurrency(self, value: int) -> int:
+        """Resize the worker pool at runtime and return the resulting concurrency.
+
+        Extra workers are started immediately; surplus workers are cancelled after the
+        task they are running finishes, so a running deployment is never interrupted.
+        """
+        target = max(1, int(value))
+        self.config.max_concurrency = target
+        live = [w for w in self._workers if not w.done()]
+        while len(live) < target:
+            index = len(self._workers)
+            worker = asyncio.create_task(self._worker(index), name=f"openlab-worker-{index}")
+            self._workers.append(worker)
+            live.append(worker)
+        while len(live) > target:
+            worker = live.pop()
+            worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await worker
+            if worker in self._workers:
+                self._workers.remove(worker)
+        return len([w for w in self._workers if not w.done()])
+
     async def stop(self) -> None:
         self._stopping = True
         for worker in self._workers:
@@ -107,6 +132,7 @@ class TaskScheduler:
 
     def _enqueue(self, task_id: str, priority: int) -> None:
         self._queue_sequence += 1
+        self._queued_ids.add(task_id)
         self._queue.put_nowait((-int(priority), self._queue_sequence, task_id))
 
     async def requeue_pending(self) -> int:
@@ -165,7 +191,14 @@ class TaskScheduler:
             if task.status in (TaskStatus.SUCCEEDED.value, TaskStatus.CANCELLED.value):
                 return False
             task.cancel_requested = True
-            if task.status == TaskStatus.QUEUED.value:
+            if task.status in (
+                TaskStatus.QUEUED.value,
+                TaskStatus.PAUSED.value,
+                TaskStatus.WAITING_FOR_USER.value,
+            ):
+                # Not running yet, so cancelling is immediate. Previously a paused task
+                # only got the flag set: the API answered "cancelled" while the row stayed
+                # paused for ever.
                 task.status = TaskStatus.CANCELLED.value
                 task.finished_at = datetime.now(timezone.utc)
                 task.message = "cancelled before start"
@@ -196,7 +229,10 @@ class TaskScheduler:
             task.status = TaskStatus.QUEUED.value
             task.message = "resumed by user"
             priority = int(task.priority or 0)
-        self._enqueue(task_id, priority)
+        # Only enqueue when this task is not already waiting in the queue, so a
+        # double resume cannot run the same deployment twice.
+        if task_id not in self._queued_ids:
+            self._enqueue(task_id, priority)
         bus.publish("task.queued", {"task_id": task_id, "resumed": True})
         return True
 
@@ -290,23 +326,43 @@ class TaskScheduler:
         while not self._stopping:
             try:
                 task_id = (await self._queue.get())[2]
+                self._queued_ids.discard(task_id)
             except asyncio.CancelledError:
                 return
+            # Each task runs in its own child task. Cancelling a *task* (pause/stop)
+            # must never cancel the worker itself: the old code stored the worker task
+            # in _running, so pausing a job killed the only consumer and every later
+            # queued job sat in the queue for ever.
+            runner = asyncio.create_task(self._run(task_id), name=f"openlab-task-{index}")
+            self._running[task_id] = runner
             try:
-                await self._run(task_id)
+                await asyncio.shield(runner)
             except asyncio.CancelledError:
-                return
+                if self._stopping:
+                    runner.cancel()
+                    with contextlib.suppress(BaseException):
+                        await runner
+                    return
+                # A stray cancel of the worker itself: keep consuming the queue.
             except Exception:  # noqa: BLE001 - worker must survive
                 log.exception("worker %d crashed while running %s", index, task_id)
             finally:
+                self._running.pop(task_id, None)
                 self._queue.task_done()
 
     async def _run(self, task_id: str) -> None:
         with session_scope() as session:
             task = session.get(ProjectTask, task_id)
-            if task is None or task.status == TaskStatus.CANCELLED.value:
+            if task is None:
                 return
-            if task.status == TaskStatus.SUCCEEDED.value:
+            # A task that was cancelled or paused while it sat in the queue must not
+            # start when a worker finally pops it. The old code only skipped cancelled
+            # and succeeded rows, so "paused" deployment jobs still ran.
+            if task.status in (
+                TaskStatus.CANCELLED.value,
+                TaskStatus.SUCCEEDED.value,
+                TaskStatus.PAUSED.value,
+            ):
                 return
             task.status = TaskStatus.RUNNING.value
             task.started_at = datetime.now(timezone.utc)
@@ -315,9 +371,6 @@ class TaskScheduler:
             project_id = task.project_id
             payload = dict(task.payload or {})
         handler = self.handler_for(kind)
-        current = asyncio.current_task()
-        if current is not None:
-            self._running[task_id] = current
         await self.set_stage(task_id, "running", project_id)
         bus.publish("task.started", {"task_id": task_id, "kind": kind, "project_id": project_id})
         ctx = TaskContext(task_id=task_id, kind=kind, project_id=project_id, payload=payload, scheduler=self)
@@ -351,7 +404,11 @@ class TaskScheduler:
                         row.cancel_requested = False
                         row.finished_at = None
                         row.message = "requeued after shutdown"
-                    else:
+                    elif row.status == TaskStatus.RUNNING.value:
+                        # Only a still-running row may be demoted. pause()/cancel()
+                        # already wrote the final state, and resume() may have moved it
+                        # back to queued before this cancellation handler ran -- blindly
+                        # overwriting it left a resumed task stuck as "paused" for ever.
                         row.status = (
                             TaskStatus.CANCELLED.value if cancelled_by_user else TaskStatus.PAUSED.value
                         )
@@ -377,7 +434,6 @@ class TaskScheduler:
                 {"task_id": task_id, "project_id": project_id, "kind": kind, "error": message},
             )
         finally:
-            self._running.pop(task_id, None)
             self._seq.pop(task_id, None)
 
     # -- introspection ----------------------------------------------------

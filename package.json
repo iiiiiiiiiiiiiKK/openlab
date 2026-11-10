@@ -1,7 +1,7 @@
 {
   "name": "openlab",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OPENLAB \u2014 Open Source Project Experience Lab (local-first deployment, exploration and evidence workbench)",
   "workspaces": [
     "apps/web",

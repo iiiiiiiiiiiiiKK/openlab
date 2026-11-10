@@ -15,7 +15,6 @@ from engine.runtime.host import (
     HostRuntime,
     _inject_port_flag,
     environment_warning,
-    find_service_port,
     runtime_available,
 )
 

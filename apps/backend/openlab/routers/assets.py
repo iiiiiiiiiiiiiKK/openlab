@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 
 from engine.asset_manager.manager import AssetManager
@@ -16,7 +16,7 @@ from engine.media_processor.ffmpeg import (
 )
 
 from openlab.db import session_scope
-from openlab.models import Asset, Project
+from openlab.models import Asset
 from openlab.schemas import AssetExportRequest, AssetRename, GifRequest, VideoConvertRequest
 from openlab.services.explore import asset_summary
 
@@ -112,16 +112,28 @@ async def delete_asset(request: Request, asset_id: str, remove_file: bool = True
         ok = manager.delete_asset(asset_id, remove_file=remove_file)
         if not ok:
             raise HTTPException(status_code=404, detail="asset not found")
-        return {"deleted": True}
+        return {"deleted": True, "warning": manager.last_delete_warning}
 
 
 @router.post("/export")
 async def export_assets(request: Request, body: AssetExportRequest) -> dict:
     layout = request.app.state.settings.resolve_data()
+    target = Path(body.target_dir).expanduser()
+    if not target.is_absolute():
+        raise HTTPException(status_code=400, detail="target_dir must be an absolute path")
+    resolved = target.resolve()
+    # Never let an export write back into the OPENLAB data tree: that would let one
+    # asset overwrite another project evidence file or the database beside it.
+    root = layout.root.resolve()
+    if resolved == root or root in resolved.parents:
+        raise HTTPException(
+            status_code=400,
+            detail="target_dir must be outside the OPENLAB data directory",
+        )
 
     with session_scope() as session:
         manager = AssetManager(session, layout)
-        written = manager.bulk_export(body.asset_ids, Path(body.target_dir))
+        written = manager.bulk_export(body.asset_ids, resolved)
         return {"exported": [str(p) for p in written], "count": len(written)}
 
 
@@ -134,7 +146,6 @@ async def make_gif(request: Request, body: GifRequest) -> dict:
         if asset is None:
             raise HTTPException(status_code=404, detail="asset not found")
         source = manager.absolute_path(asset)
-        project = session.get(Project, asset.project_id)
         project_id = asset.project_id
     if not source.exists():
         raise HTTPException(status_code=410, detail="source video is missing on disk")
@@ -212,7 +223,6 @@ async def convert_video(request: Request, body: VideoConvertRequest) -> dict:
 
 @router.post("/capture/{project_id}")
 async def capture_assets(request: Request, project_id: str) -> dict:
-    from openlab.schemas import AssetCaptureRequest
     from openlab.services.explore import resolve_project_url
 
     url = resolve_project_url(project_id)

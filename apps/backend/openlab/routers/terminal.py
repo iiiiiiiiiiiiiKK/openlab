@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
@@ -11,7 +10,6 @@ from engine.core.security import redact
 
 from openlab.db import session_scope
 from openlab.models import Project, TaskLog
-from openlab.routers.projects import _walk_entries
 
 router = APIRouter(prefix="/api/projects", tags=["terminal"])
 
@@ -45,7 +43,12 @@ async def project_logs(
     except OSError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     lines = text.splitlines()[-tail:]
-    return {"name": filename, "lines": [redact(l) for l in lines], "exists": True, "size": path.stat().st_size}
+    return {
+        "name": filename,
+        "lines": [redact(line) for line in lines],
+        "exists": True,
+        "size": path.stat().st_size,
+    }
 
 
 @router.get("/{project_id}/logs/files")

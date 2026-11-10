@@ -33,6 +33,10 @@ Rules:
 - Keep edits to the fewest files that can fix the error.
 """
 
+# A file offered for editing is sent whole, because the repair contract asks for the
+# complete new content. Anything larger than this is skipped rather than truncated.
+MAX_EDITABLE_FILE_BYTES = 60_000
+
 STAGE_HINT = {
     "INSTALLING": "dependency installation failed",
     "BUILDING": "build step failed",
@@ -179,9 +183,12 @@ def locate_relevant_files(workspace_dir: Path, logs: str, plan: dict, limit: int
         if rel in selected:
             continue
         try:
-            if path.stat().st_size > 400_000:
+            if path.stat().st_size > MAX_EDITABLE_FILE_BYTES:
+                # The model is asked for the COMPLETE new file content, so a file it
+                # cannot see in full must never be offered as an edit candidate:
+                # applying a 12k excerpt used to truncate real source files.
                 continue
-            selected[rel] = path.read_text(encoding="utf-8", errors="replace")[:12000]
+            selected[rel] = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         if len(selected) >= limit:
@@ -225,6 +232,7 @@ async def propose_repair(client: AIClient, ctx: RepairContext, budget: Budget) -
         project_id=ctx.project_id,
         task_id=None,
         prefer_cheap=False,
+        budget=budget,
     )
     edits = data.get("edits") or []
     if not isinstance(edits, list) or not edits:
@@ -278,6 +286,8 @@ async def run_repair_loop(
         backup_root = ctx.patch_dir / f"backup-attempt-{index}"
         applied_files: list[str] = []
         try:
+            # apply_patch is all-or-nothing: on failure the workspace is restored,
+            # so the next attempt never stacks a patch on a half-written tree.
             applied_files = apply_patch(bundle, ctx.workspace_dir, backup_root)
         except Exception as exc:  # noqa: BLE001 - patch errors are user-facing
             attempts.append(
@@ -328,7 +338,6 @@ def rollback_last_attempt(ctx: RepairContext, attempts: list[RepairAttempt]) -> 
     for attempt in reversed(attempts):
         if attempt.applied and not attempt.rolled_back:
             backup_root = ctx.patch_dir / f"backup-attempt-{attempt.attempt}"
-            changes = build_changes(ctx.source_dir, ctx.workspace_dir, [])
             synthetic = PatchBundle(changes=[])
             from engine.ai_agent.patch import FileChange
 

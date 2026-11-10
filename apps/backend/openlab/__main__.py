@@ -11,7 +11,7 @@ from pathlib import Path
 import uvicorn
 
 from openlab.app import create_app
-from openlab.config import Settings, get_settings
+from openlab.config import get_settings
 
 
 def build_parser() -> argparse.ArgumentParser:

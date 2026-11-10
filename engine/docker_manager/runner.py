@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from engine.core.process import CommandResult, run_command, which
+from engine.core.process import CommandResult, run_command
 from engine.docker_manager.docker_cli import find_docker_binary
 
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
 
 from engine.task_scheduler.scheduler import SchedulerConfig, TaskContext, TaskScheduler
 

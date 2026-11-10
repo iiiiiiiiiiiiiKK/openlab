@@ -55,7 +55,9 @@ class ProviderConfig:
 
     @classmethod
     def from_row(cls, row: AIProvider, box: SecretBox) -> "ProviderConfig":
-        api_key = box.decrypt(row.api_key_enc or "")
+        # The plaintext key is deliberately NOT carried here: `adapter_for()` decrypts it
+        # at the single point where the request is built. Decrypting it eagerly only
+        # created an extra copy of the secret in memory for nobody to use.
         return cls(
             id=row.id,
             name=row.name,
@@ -128,7 +130,12 @@ class AIClient:
         prefer_cheap: bool = False,
         json_mode: bool = False,
         max_tokens: int | None = None,
+        budget: "Budget | None" = None,
     ) -> CompletionResult:
+        if budget is not None:
+            # Checked before every call: the repair loop used to build a Budget and
+            # never consume it, so max_requests/max_tokens/max_usd enforced nothing.
+            budget.check()
         row, config = self.resolve(provider_id=provider_id, prefer_cheap=prefer_cheap)
         if max_tokens:
             config.max_tokens = max_tokens
@@ -137,6 +144,8 @@ class AIClient:
         result: CompletionResult | None = None
         try:
             result = await adapter.complete(messages, json_mode=json_mode)
+            if budget is not None:
+                budget.consume(result, config.price_in_per_mtok, config.price_out_per_mtok)
             return result
         except ProviderError as exc:
             error = str(exc)
@@ -161,6 +170,7 @@ class AIClient:
         provider_id: str | None = None,
         prefer_cheap: bool = False,
         schema_hint: str | None = None,
+        budget: "Budget | None" = None,
     ) -> dict[str, Any]:
         if schema_hint:
             messages = list(messages) + [
@@ -174,8 +184,15 @@ class AIClient:
             provider_id=provider_id,
             prefer_cheap=prefer_cheap,
             json_mode=True,
+            budget=budget,
         )
-        parsed = extract_json(result.text)
+        try:
+            parsed = extract_json(result.text)
+        except ValueError as exc:
+            # A malformed reply is a provider problem, not a crash: the repair loop
+            # only catches ProviderError/BudgetExceeded, so an unwrapped ValueError
+            # used to abort the whole deployment task.
+            raise ProviderError(f"model did not return valid JSON: {exc}", body=result.text[:800]) from exc
         if not isinstance(parsed, dict):
             raise ProviderError("expected a JSON object from the model", body=str(parsed)[:800])
         return parsed

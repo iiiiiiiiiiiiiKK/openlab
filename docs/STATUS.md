@@ -1,7 +1,7 @@
 # OPENLAB — runtime status
 
 ```
-version    : 0.1.0
+version    : 0.1.1
 backend    : http://127.0.0.1:3210 (FastAPI, SQLite/WAL)
 data dir   : <repo>/OPENLAB_DATA
 ```
@@ -10,25 +10,27 @@ data dir   : <repo>/OPENLAB_DATA
 
 | Check | Result |
 | --- | --- |
-| `pytest tests/unit tests/integration -q` | **171 passed, 2 skipped** (skips: no system FFmpeg for the GIF e2e test) |
+| `pytest tests/unit tests/integration -q` | **191 passed, 1 skipped** |
+| `pytest -q` (everything, including e2e) | **206 passed, 5 skipped** |
 | `pytest tests/e2e -q -rs` | **6 passed, 2 skipped** (MP4 needs full FFmpeg; Docker compose needs a daemon) |
-| `scripts/verify-core-loop.py` | import → deploy → preview → explore → assets → report = **VERIFIED** |
 | `npx tsc --noEmit` (apps/web) | clean |
-| `npx vite build` (apps/web) | 4 chunks (141 KB app + 208 KB React + 26 KB icons) |
+| `npx vite build` (apps/web) | 4 chunks (187 KB app + 208 KB React + 27 KB icons) |
 | UI screenshots | 9 captured by `scripts/capture-ui-screenshots.py` into `docs/screenshots/` (Chinese UI) |
 | `npm test` (apps/web) | **15 passed** — translation catalogue + warning + hint mapping |
+| Live end-to-end | import → deploy → preview → explore → assets → report = **VERIFIED** |
 
 ## Host capabilities detected here
 
 | Component | Status |
 | --- | --- |
-| Python | 3.12.14 |
-| Node | 24.22.1 |
+| Python | 3.11.3 (the code targets 3.12+, 3.11 works too) |
+| Node | 24.22.2 |
 | Docker CLI / daemon | **not installed** — container deployments end in `WAITING_FOR_USER` with that reason |
-| Playwright Chromium | installed in `.browsers/chromium-1148` |
+| Playwright Chromium | installed (`chromium-1254`) |
+| Playwright FFmpeg | installed (`ffmpeg-1010`) — required for video recording |
 | FFmpeg | Playwright's bundled build (png + libvpx only). GIF works via the frames+Pillow path; MP4 returns 409 naming the missing encoder |
 | Rust / cargo | **not installed** — desktop installers cannot be built on this host |
-| git | **not installed** — imports use the GitHub codeload ZIP API, which is why no git binary is required |
+| git | available, but imports still use the GitHub codeload ZIP API |
 
 ## Optional host-runtime mode
 
@@ -48,17 +50,73 @@ changes.
 
 ## Observed end-to-end evidence
 
-From a live run on this host (`scripts/verify-core-loop.py`):
+From a live run on this host (import → deploy → preview → explore → assets → report):
 
 ```
-RUNNING on http://127.0.0.1:41003 (HTTP 200)
-title='OPENLAB Node Fixture'   exploration=VERIFIED (3 steps)
-assets: 4 screenshots, 1 video  report: VERIFIED
+RUNNING on http://127.0.0.1:41000 (HTTP 200, probed at report time)
+title='OPENLAB Node Fixture'   exploration=VERIFIED (2 steps)
+assets: 8 screenshots   report: VERIFIED
 ```
 
 The generated project folder contained real artefacts — `screenshots/preview-desktop.png` (1440×900),
-`videos/exploration-*.webm`, `reports/report-v1.{md,html,json}` — and the report rendered them with the
-observed HTTP status, step table and console/network error summary.
+`screenshots/step-00-goto.png`, `reports/report-v1.{md,html,json}` — and the report rendered them with
+the observed HTTP status, the step table and the console/network error summary.
+
+## Fixed in 0.1.1 — evidence-integrity and correctness pass
+
+This release closes the defects that made OPENLAB unsafe to trust or use as a real tool.
+
+### Would have corrupted or lost real data
+
+| Defect | Fix |
+| --- | --- |
+| Generated compose used `build.context: ..`, which pointed Docker at the project folder (`source/`, `screenshots/`, previous build output) instead of `workspace/`, so `COPY . /app` never received the application | `generate_compose(..., build_context=...)` now receives the compose-relative path to `workspace/`; `deploy._build_context_relpath()` computes it |
+| AI repair sent a 12 000-character excerpt while asking for "the COMPLETE new file content"; applying it silently truncated real source files | files larger than `MAX_EDITABLE_FILE_BYTES` are skipped instead of truncated |
+| Unified-diff context lines were overwritten instead of compared, so an unmatching hunk "applied successfully" and corrupted the file | context lines are compared and a mismatch raises `PatchError` |
+| `apply_patch` wrote files one by one; a mid-bundle failure left the workspace half-patched and the next attempt stacked on it | the write is all-or-nothing and rolls back through `rollback_patch()` |
+| `delete_project` ran `rmtree` on the `data_dir` column with no containment check | only paths inside `OPENLAB_DATA/projects/` may be removed |
+| Two projects with the same name shared container/network names, so deploying B tore down A | container/network names include the project id |
+
+### Lied about results (the product's own red line)
+
+| Defect | Fix |
+| --- | --- |
+| An exploration step started as `VERIFIED`; `goto` discarded the HTTP response, so a 404 page and a bare `wait` were both reported as verified experience | status starts `UNVERIFIED`; only asserting actions can be verified; `goto` fails on ≥400 |
+| A run made only of passive steps could still be `VERIFIED` | `ExplorationReport.status()` requires at least one truly verified step |
+| Console/network errors accumulated across steps, so step N inherited step N−1's errors | `console_errors_since()` attributes them per step |
+| The report asserted "answered HTTP health checks (status 200)" from the deploy flag alone | the status is probed live; when nothing answers the report says so |
+| `.md`, `.html` and `.json` recomputed the payload independently and could disagree | one payload is shared by all three renderers |
+
+### Would have crashed or hung the app
+
+| Defect | Fix |
+| --- | --- |
+| A bracketed IPv6 entry in `NO_PROXY` (`…,::1,[::1]`) made every `httpx.AsyncClient` raise `InvalidURL: Invalid port: ':1]'` at construction — GitHub import and every model call failed | `engine/core/http.py` normalises the variable and is the only place clients are built |
+| Playwright validated a recording ffmpeg build it could not find and dropped the whole browser session | availability is detected up front; recording is dropped (with the reason logged) instead of the session |
+| `PLAYWRIGHT_BROWSERS_PATH` was forced to the data directory even when empty, hiding a working global install | the variable is only overridden when a Chromium build actually exists there |
+| A failed browser launch leaked a Chromium + driver process (`__aenter__` raised, `__aexit__` never ran) | `__aenter__` tears down on failure and `__aexit__` is idempotent |
+| `AIClient` sessions were never closed on usage/settings endpoints; the pool ran dry and the API hung | every caller closes its session |
+| `Budget.consume()` was never called, so the request/token/USD caps did nothing | `client.complete()` and `complete_json()` accept and consume a budget |
+| A malformed model reply raised `ValueError` from `extract_json` and killed the deploy task | it is wrapped in `ProviderError` and handled as a normal repair failure |
+| Every output line triggered its own commit; a long build blocked the event loop on the SQLite write lock | log lines are coalesced into batches |
+
+### Scheduler semantics
+
+| Defect | Fix |
+| --- | --- |
+| A task paused while queued still executed when a worker popped it | `_run` skips `paused` rows |
+| `cancel()` on a paused task only set the flag, leaving it paused for ever | queued/paused/waiting tasks are cancelled immediately |
+| Cancelling a task cancelled the *worker* itself (it was the entry in `_running`), so every later job stalled | each task runs in its own child task; the worker keeps consuming |
+| The cancellation handler overwrote the row after `resume()` had requeued it, leaving it stuck | it only demotes rows still marked `running` |
+| `resume()` could enqueue the same task twice | enqueue is de-duplicated |
+| `max_parallel_deployments` changed only the config, never the worker pool | `scheduler.set_concurrency()` resizes the pool |
+
+### Settings and lifecycle
+
+| Defect | Fix |
+| --- | --- |
+| UI settings were written to `app_settings` and never read back, so every restart silently restored defaults | `_apply_persisted_settings()` hydrates them at startup |
+| `STARTING → RUNNING` and `PENDING → PREPARING` were rejected by the state machine and silently forced | both transitions are legal; illegal ones are logged instead of swallowed |
 
 ## Known limitations (by design, all surfaced to the user)
 
@@ -70,6 +128,7 @@ observed HTTP status, step table and console/network error summary.
 | Target app refuses framing | preview shows a notice; *Open in a new tab* still works, screenshots unaffected |
 | Minimal FFmpeg | WebM ✅, GIF via Pillow ✅, MP4 → `409` with the exact missing pieces |
 | No Rust toolchain | `apps/desktop` is complete but cannot be packaged here; documented in its README |
+| No terminal authentication | OPENLAB binds `127.0.0.1` only. With `allow_lan=true` the terminal endpoint becomes reachable by anyone on the LAN — enable LAN mode only behind your own reverse proxy with auth |
 
 ## Restart behaviour
 

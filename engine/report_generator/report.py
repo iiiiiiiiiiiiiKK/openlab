@@ -104,15 +104,21 @@ def build_payload(data: ReportInput) -> dict:
 
 def build_verdict(data: ReportInput) -> str:
     """A short, evidence-based assessment (never README copy)."""
-    project = data.project or {}
     lines: list[str] = []
     deploy = data.deploy or {}
     if deploy.get("success"):
         port = deploy.get("port")
-        lines.append(
-            f"- The project really started: it answered HTTP health checks on "
-            f"`http://127.0.0.1:{port}` (status {deploy.get('http_status')})."
-        )
+        status_code = deploy.get("http_status")
+        if status_code is None:
+            lines.append(
+                f"- The project was started on `http://127.0.0.1:{port}`, but it did not "
+                "answer an HTTP probe at report time, so no status code can be claimed."
+            )
+        else:
+            lines.append(
+                f"- The project really started: it answered HTTP health checks on "
+                f"`http://127.0.0.1:{port}` (status {status_code})."
+            )
         if (data.environment or {}).get("strategy") == "host":
             lines.append(
                 "- It ran **without container isolation** on the host machine (unsandboxed opt-in mode)."
@@ -149,8 +155,8 @@ def build_verdict(data: ReportInput) -> str:
     return "\n".join(lines)
 
 
-def render_markdown(data: ReportInput) -> str:
-    payload = build_payload(data)
+def render_markdown(data: ReportInput, payload: dict | None = None) -> str:
+    payload = payload or build_payload(data)
     p = payload["project"]
     out: list[str] = []
     out.append(f"# {p.get('display_name') or p.get('name') or 'Project'} — OPENLAB experience report\n")
@@ -293,9 +299,9 @@ def render_markdown(data: ReportInput) -> str:
     return redact("\n".join(out))
 
 
-def render_html(data: ReportInput) -> str:
-    payload = build_payload(data)
-    markdown = render_markdown(data)
+def render_html(data: ReportInput, payload: dict | None = None) -> str:
+    payload = payload or build_payload(data)
+    markdown = render_markdown(data, payload=payload)
     body = _markdown_to_html(markdown)
     assets_html = ""
     for asset in data.assets:
@@ -477,12 +483,14 @@ class WrittenReport:
 def write_reports(data: ReportInput, reports_dir: Path, basename: str = "report") -> WrittenReport:
     reports_dir = Path(reports_dir)
     reports_dir.mkdir(parents=True, exist_ok=True)
+    # One payload for all three artefacts. Recomputing it per format produced a
+    # different generated_at / verdict in the .md, .html and .json of the same report.
     payload = build_payload(data)
     markdown_path = reports_dir / f"{basename}.md"
     html_path = reports_dir / f"{basename}.html"
     json_path = reports_dir / f"{basename}.json"
-    markdown_path.write_text(render_markdown(data), encoding="utf-8")
-    html_path.write_text(render_html(data), encoding="utf-8")
+    markdown_path.write_text(render_markdown(data, payload=payload), encoding="utf-8")
+    html_path.write_text(render_html(data, payload=payload), encoding="utf-8")
     json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     title = f"{(data.project or {}).get('name') or 'project'} — OPENLAB report"
     return WrittenReport(

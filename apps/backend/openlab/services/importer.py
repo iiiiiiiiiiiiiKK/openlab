@@ -21,7 +21,7 @@ from engine.project_importer.github import (
     fetch_metadata,
     find_readme,
 )
-from engine.project_importer.repo_url import RepoRef, default_project_name, parse_repo_url, slugify
+from engine.project_importer.repo_url import RepoRef, parse_repo_url, slugify
 from engine.project_analyzer.analyzer import analyze_project
 
 from openlab.models import Project, ProjectEnvironment, ProjectRepository
@@ -202,6 +202,14 @@ def import_from_folder(
     folder = Path(folder).expanduser().resolve()
     if not folder.is_dir():
         raise ImportFailed(f"folder not found: {folder}")
+    # Copying the data directory into itself produced an unbounded recursive copy and
+    # let the serving endpoints read OPENLAB's own database and secrets.
+    layout_root = layout.root.resolve()
+    if folder == layout_root or layout_root in folder.parents:
+        raise ImportFailed("refusing to import OPENLAB's own data directory")
+    for blocked in (Path.home() / ".ssh", Path.home() / ".aws", Path.home() / ".config"):
+        if blocked.exists() and (folder == blocked or blocked in folder.parents):
+            raise ImportFailed(f"refusing to import a credentials directory: {blocked}")
     project_id = uuid.uuid4().hex
     layout.ensure_project(project_id)
     source_dir = layout.project_subdir(project_id, "source")

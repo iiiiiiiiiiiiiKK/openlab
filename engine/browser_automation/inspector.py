@@ -225,6 +225,18 @@ class ConsoleCollector:
     def console_errors(self) -> list[dict]:
         return [m for m in self.messages if m.get("type") in ("error", "pageerror")]
 
+    def console_errors_since(self, message_index: int) -> list[dict]:
+        """Console errors recorded after ``message_index`` (per-step attribution).
+
+        ``ConsoleCollector`` is attached once per browser session, so without this the
+        errors of every earlier step leaked into later steps and made verification
+        results wrong in both directions.
+        """
+        start = max(0, int(message_index or 0))
+        return [
+            m for m in self.messages[start:] if m.get("type") in ("error", "pageerror")
+        ]
+
     def summary(self) -> dict:
         return {
             "console_total": len(self.messages),

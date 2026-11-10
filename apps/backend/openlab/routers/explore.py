@@ -17,7 +17,6 @@ from openlab.models import (
 )
 from openlab.schemas import (
     BrowserSessionRequest,
-    CustomTaskRequest,
     ExploreRequest,
     PreviewRequest,
 )
@@ -27,7 +26,6 @@ from openlab.services.explore import (
     create_browser_session,
     plan_summary,
     resolve_project_url,
-    run_exploration,
 )
 
 router = APIRouter(prefix="/api/projects", tags=["explore"])

@@ -13,6 +13,8 @@ from typing import Any
 
 import httpx
 
+from engine.core.http import build_async_client
+
 
 class ProviderError(RuntimeError):
     """Raised when a provider call fails, with the HTTP status when known."""
@@ -91,7 +93,7 @@ class ProviderAdapter:
         url, headers, payload = self.build_request(messages, json_mode=json_mode)
         started = time.monotonic()
         own_client = client is None
-        client = client or httpx.AsyncClient(timeout=self.timeout_s)
+        client = client or build_async_client(timeout=self.timeout_s)
         try:
             resp = await client.post(url, headers=headers, json=payload)
         except httpx.HTTPError as exc:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 
 from engine.project_analyzer.analyzer import analyze_project
 from engine.project_analyzer.detect import find_ports, parse_env_example, scan_tree

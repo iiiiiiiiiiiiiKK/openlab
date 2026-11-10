@@ -311,7 +311,7 @@ def test_delete_project_removes_data(client: TestClient, fixtures_dir: Path) -> 
     project_id = client.post(
         "/api/projects/import/local", json={"path": str(fixtures_dir / "node-web")}
     ).json()["project_id"]
-    detail = client.get(f"/api/projects/{project_id}").json()
+    assert client.get(f"/api/projects/{project_id}").status_code == 200
     assert client.delete(f"/api/projects/{project_id}").json()["deleted"] is True
     assert client.get(f"/api/projects/{project_id}").status_code == 404
     assert client.get("/api/projects").json()["items"] == []

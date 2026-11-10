@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from engine.core.http import build_async_client
+
 
 @dataclass
 class PortLease:
@@ -105,7 +107,7 @@ async def http_ready(
         attempts += 1
         attempt_start = time.monotonic()
         try:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            async with build_async_client(timeout=10, follow_redirects=True) as client:
                 resp = await client.get(url)
             last_status = resp.status_code
             body = resp.text[:4000]

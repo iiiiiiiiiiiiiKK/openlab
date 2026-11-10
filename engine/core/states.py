@@ -51,6 +51,9 @@ TERMINAL_STATES: frozenset[DeployStatus] = frozenset(
 _ALLOWED: dict[DeployStatus, set[DeployStatus]] = {
     DeployStatus.PENDING: {
         DeployStatus.ANALYZING,
+        # A redeploy of an already-imported project skips analysis and goes straight
+        # to PREPARING; refusing that transition only produced a warning on every run.
+        DeployStatus.PREPARING,
         DeployStatus.CANCELLED,
         DeployStatus.FAILED,
     },
@@ -89,6 +92,9 @@ _ALLOWED: dict[DeployStatus, set[DeployStatus]] = {
     },
     DeployStatus.STARTING: {
         DeployStatus.HEALTH_CHECK,
+        # The host runtime has no container layer to wait for: once the process
+        # answers HTTP it moves straight from STARTING to RUNNING.
+        DeployStatus.RUNNING,
         DeployStatus.FAILED,
         DeployStatus.WAITING_FOR_USER,
         DeployStatus.CANCELLED,

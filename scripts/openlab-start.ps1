@@ -73,9 +73,11 @@ $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $root ".browsers"
 if (-not (Test-Path $env:PLAYWRIGHT_BROWSERS_PATH)) { New-Item -ItemType Directory -Path $env:PLAYWRIGHT_BROWSERS_PATH | Out-Null }
 $env:TEMP = Join-Path $root ".tmp"
 if (-not (Test-Path $env:TEMP)) { New-Item -ItemType Directory -Path $env:TEMP | Out-Null }
-& $venvPython -m playwright install chromium 2>&1 | Select-Object -Last 2
+# `chromium` alone is not enough: Playwright validates its own ffmpeg build when a
+# recorded page is created, and a missing one aborts the whole browser session.
+& $venvPython -m playwright install chromium ffmpeg 2>&1 | Select-Object -Last 2
 if ($LASTEXITCODE -ne 0) {
-    Write-Warn2 "Chromium install failed; preview/screenshots will be unavailable until it succeeds."
+    Write-Warn2 "Browser install failed; preview/screenshots/recording will be unavailable until it succeeds."
 }
 
 # ---------------------------------------------------------------------------

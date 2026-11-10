@@ -113,10 +113,19 @@ def delete_project_data(
             session.delete(row)
 
     removed: list[str] = []
+    # `project.data_dir` is a database column: if it ever held a parent path (a bad
+    # write, a hand-edited row, a restored backup), a blind rmtree would delete far
+    # more than the project. Only paths that are a real child of projects/ may go.
+    allowed_root = (layout.root / "projects").resolve()
     for candidate in {data_dir, layout.project_dir(project_id)}:
-        if candidate and Path(candidate).exists():
-            shutil.rmtree(candidate, ignore_errors=True)
-            removed.append(str(candidate))
+        if not candidate:
+            continue
+        resolved = Path(candidate).resolve()
+        if resolved == allowed_root or allowed_root not in resolved.parents:
+            continue
+        if resolved.exists():
+            shutil.rmtree(resolved, ignore_errors=True)
+            removed.append(str(resolved))
 
     return {
         "deleted": True,

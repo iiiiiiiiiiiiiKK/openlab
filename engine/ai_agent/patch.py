@@ -138,27 +138,37 @@ def build_changes(
 
 
 def apply_patch(bundle: PatchBundle, workspace_dir: Path, backup_root: Path) -> list[str]:
-    """Write every change into the workspace, backing up prior contents first."""
+    """Write every change into the workspace, backing up prior contents first.
+
+    The write is all-or-nothing: if any file fails, every file already written in this
+    call is restored from its backup before the error is raised. Without that, a
+    half-applied bundle left the workspace in a state that no later attempt could
+    reason about.
+    """
     workspace_dir = Path(workspace_dir)
     workspace_dir.mkdir(parents=True, exist_ok=True)
     backup_root = Path(backup_root)
     backup_root.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
-    for change in bundle.changes:
-        target = (workspace_dir / change.path).resolve()
-        if workspace_dir.resolve() not in target.parents and target != workspace_dir.resolve():
-            raise PatchError(f"{change.path} escapes the workspace")
-        if target.exists():
-            backup = backup_root / change.path
-            backup.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(target, backup)
-        else:
-            marker = backup_root / (change.path + ".absent")
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text("", encoding="utf-8")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(change.new_content, encoding="utf-8")
-        written.append(change.path)
+    try:
+        for change in bundle.changes:
+            target = (workspace_dir / change.path).resolve()
+            if workspace_dir.resolve() not in target.parents and target != workspace_dir.resolve():
+                raise PatchError(f"{change.path} escapes the workspace")
+            if target.exists():
+                backup = backup_root / change.path
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, backup)
+            else:
+                marker = backup_root / (change.path + ".absent")
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("", encoding="utf-8")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(change.new_content, encoding="utf-8")
+            written.append(change.path)
+    except Exception:
+        rollback_patch(bundle, workspace_dir, backup_root)
+        raise
     return written
 
 
@@ -191,7 +201,6 @@ def apply_unified_diff(diff_text: str, root: Path) -> list[str]:
     lines = diff_text.splitlines()
     index = 0
     current_file: str | None = None
-    old_lines: list[str] = []
     targets: dict[str, list[str]] = {}
     while index < len(lines):
         line = lines[index]
@@ -236,10 +245,14 @@ def _apply_hunk(
             index += 1
             continue
         tag, body = line[0], line[1:]
-        if tag == " ":
-            out.insert(cursor, body) if cursor > len(out) - 1 else None
-            if cursor <= len(out) - 1 and out[cursor] != body:
-                out[cursor] = body
+        if tag == " " or tag == "":
+            # A context line must match the file. The old code silently overwrote
+            # whatever happened to be at that offset, so a hunk generated from a
+            # different revision corrupted the file while the patch reported success.
+            if cursor >= len(out):
+                raise PatchError(f"patch context runs past the end of {rel} at line {cursor + 1}")
+            if out[cursor] != body:
+                raise PatchError(f"patch context mismatch at line {cursor + 1} of {rel}")
             cursor += 1
         elif tag == "-":
             if cursor < len(out) and out[cursor] == body:

@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from engine.ai_agent.client import AIClient
 from engine.browser_automation.launcher import ensure_artifact_temp
+from engine.core.http import normalize_proxy_environment
 from engine.core.security import SecretBox
 from engine.task_scheduler.scheduler import SchedulerConfig, TaskScheduler
 
@@ -44,6 +45,10 @@ CSP = (
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
+    # A bracketed IPv6 entry in NO_PROXY makes httpx raise InvalidURL during client
+    # construction, which broke every outbound call (GitHub import, model calls)
+    # before it was attempted. Normalise the variable before anything uses it.
+    normalize_proxy_environment()
     settings = settings or get_settings()
     layout = settings.resolve_data()
 
@@ -55,6 +60,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         init_database(layout.db_path)
         box = SecretBox(layout.secrets_dir)
+        # Settings written by the UI lived only in app_settings; nothing read them
+        # back, so every restart silently reset resource limits and network policy.
+        _apply_persisted_settings(settings, box)
         app.state.settings = settings
         app.state.box = box
         app.state.layout = layout
@@ -66,6 +74,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         Handlers(settings, box).register(scheduler)
         app.state.scheduler = scheduler
+        # Every AIClient owns a SQLAlchemy Session. Callers must release it; the
+        # helper below is the only sanctioned way to obtain one so a forgotten close
+        # cannot leak a pooled connection on every usage/settings request.
         app.state.ai_client = lambda: AIClient(_new_session(), box)
         bus.bind_loop(asyncio.get_running_loop())
         await scheduler.start()
@@ -187,6 +198,28 @@ def _new_session():
     from openlab.db import session_factory
 
     return session_factory()()
+
+
+def _apply_persisted_settings(settings: Settings, box: SecretBox) -> None:
+    """Load UI-edited settings from app_settings onto the live Settings object."""
+    try:
+        with session_scope() as session:
+            rows = list(session.query(AppSetting).all())
+    except Exception:  # noqa: BLE001 - never block startup on settings hydration
+        log.exception("could not load persisted settings")
+        return
+    from openlab.routers.settings import EDITABLE
+
+    for row in rows:
+        if row.key not in EDITABLE:
+            continue
+        value = (row.value or {}).get("value")
+        if value is None:
+            continue
+        try:
+            setattr(settings, row.key, value)
+        except Exception:  # noqa: BLE001 - a stale key must not break startup
+            log.warning("ignoring unreadable setting %s", row.key)
 
 
 def _load_secret_store(box: SecretBox) -> dict[str, Any]:

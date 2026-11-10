@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
 
-from engine.ai_agent.adapters import ProviderError, build_adapter
-from engine.ai_agent.client import AIClient, ProviderConfig
+from engine.ai_agent.adapters import build_adapter
+from engine.ai_agent.client import ProviderConfig
 from engine.core.security import SecretBox
 from engine.core.states import PROVIDER_DEFAULTS
 
@@ -153,7 +153,12 @@ async def test_provider(request: Request, provider_id: str) -> dict:
 @router.get("/usage/summary")
 async def usage_summary(request: Request, project_id: str | None = None, days: int | None = None) -> dict:
     client = request.app.state.ai_client()
-    return client.usage_summary(project_id=project_id, days=days)
+    try:
+        return client.usage_summary(project_id=project_id, days=days)
+    finally:
+        # The client owns a Session; leaking it exhausted the SQLAlchemy pool and
+        # took the whole API down after a handful of usage lookups.
+        client.session.close()
 
 
 @router.get("/usage/records")

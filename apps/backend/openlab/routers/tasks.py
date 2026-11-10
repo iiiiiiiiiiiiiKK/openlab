@@ -42,7 +42,7 @@ async def get_task(task_id: str) -> dict:
             )
         )
         payload = task_row_to_dict(row)
-        payload["logs"] = [log_row_to_dict(l) for l in logs]
+        payload["logs"] = [log_row_to_dict(row) for row in logs]
         return payload
 
 

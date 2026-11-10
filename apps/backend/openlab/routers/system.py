@@ -3,26 +3,16 @@
 from __future__ import annotations
 
 import platform
-import shutil
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
-from sqlalchemy import func, select
 
 from engine.browser_automation.launcher import browser_inventory, ensure_artifact_temp
 from engine.docker_manager.docker_cli import docker_status, host_report
 from engine.media_processor.ffmpeg import MediaProcessor
 
 from openlab import __version__
-from openlab.db import session_scope
 from openlab.events import bus
-from openlab.models import (
-    AIUsageRecord,
-    Asset,
-    Project,
-    ProjectTask,
-    Report,
-)
 from openlab.services.overview import build_overview
 
 router = APIRouter(prefix="/api", tags=["system"])

@@ -10,6 +10,8 @@ Guarantees:
 from __future__ import annotations
 
 import json
+import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -51,6 +53,8 @@ from openlab.services.importer import reset_workspace
 
 from engine.task_scheduler.scheduler import TaskContext
 
+log = logging.getLogger("openlab.deploy")
+
 
 @dataclass
 class DeployOutcome:
@@ -89,8 +93,16 @@ def _set_status(project_id: str, target: str, detail: str | None = None, error: 
             return
         try:
             assert_transition(project.deploy_status, target)
-        except Exception:  # noqa: BLE001 - transitions are advisory at this layer
-            pass
+        except Exception as exc:  # noqa: BLE001 - transitions are advisory at this layer
+            # Keep the write (the pipeline must be able to recover from a stale row),
+            # but leave a trace instead of silently bypassing the state machine.
+            log.warning(
+                "deploy status %s -> %s for %s bypassed the state machine: %s",
+                project.deploy_status,
+                target,
+                project_id,
+                exc,
+            )
         project.deploy_status = target
         project.deploy_status_detail = redact(detail)[:2000] if detail else None
         if error is not None:
@@ -115,7 +127,6 @@ async def prepare_environment(
     layout,
 ) -> dict:
     """Create Dockerfile/compose in ``projects/<id>/docker`` and return the plan."""
-    source_dir = layout.project_subdir(project_id, "source")
     workspace_dir = layout.project_subdir(project_id, "workspace")
     docker_dir = layout.project_subdir(project_id, "docker")
 
@@ -175,7 +186,7 @@ async def prepare_environment(
         else:
             compose_path = await _generate_compose_files(ctx, layout, project_id, plan, settings)
     elif plan.strategy == "dockerfile":
-        dockerfile_path = write_compose(
+        write_compose(
             project_id_dir(layout, project_id),
             dockerfile_name,
             build_dockerfile_from_repo(workspace_dir),
@@ -197,6 +208,21 @@ async def prepare_environment(
 
 def project_id_dir(layout, project_id: str) -> Path:
     return layout.project_dir(project_id)
+
+
+def _build_context_relpath(layout, project_id: str) -> str:
+    """Compose-relative path from <project>/docker to the writable workspace copy.
+
+    Compose resolves ``build.context`` against the directory that holds the compose
+    file. Using ``..`` pointed Docker at <project>/, which contains source/,
+    screenshots/, logs/ and the old build output, so ``COPY . /app`` never received
+    the application at the image root. The workspace is the only tree the AI may
+    modify, so it is also the correct build context.
+    """
+    docker_dir = layout.project_dir(project_id) / "docker"
+    workspace_dir = layout.project_subdir(project_id, "workspace")
+    relative = os.path.relpath(workspace_dir, docker_dir).replace(os.sep, "/")
+    return relative or "."
 
 
 def build_dockerfile_from_repo(workspace_dir: Path) -> str:
@@ -224,7 +250,7 @@ async def _generate_compose_files(
     dockerfile: str = "Dockerfile",
 ) -> Path:
     host_port = allocate_port(settings.port_range_start, settings.port_range_end)
-    extra = required_service_containers(plan)
+    extra = required_service_containers(plan, project_key=project_id)
     content = generate_compose(
         plan,
         layout.project_dir(project_id),
@@ -236,6 +262,9 @@ async def _generate_compose_files(
         allow_network=settings.allow_container_network,
         dockerfile=dockerfile,
         extra_services=extra,
+        # The compose file lives in <project>/docker, so the workspace is a sibling.
+        build_context=_build_context_relpath(layout, project_id),
+        project_key=project_id,
     )
     path = write_compose(layout.project_dir(project_id), "compose.openlab.yml", content)
     await ctx.log(
@@ -428,19 +457,44 @@ async def deploy_project(ctx: TaskContext, settings: Settings, layout, box: Secr
         attempts = [a.as_dict() for a in outcome.attempts]
         _persist_patches(project_id, layout, outcome.attempts)
         if outcome.resolved:
+            # The repair may have regenerated the compose file with a different port,
+            # so re-read it instead of reporting the port from before the fix.
+            recovered_port = _compose_host_port(compose_path) or host_port
+            recovered_url = f"http://127.0.0.1:{recovered_port}"
+            health = await http_ready(f"{recovered_url}/", timeout_s=30, interval_s=2)
+            if not health.ok:
+                _set_status(
+                    project_id,
+                    DeployStatus.WAITING_FOR_USER.value,
+                    "repair reported success but the service is not answering",
+                    error=health.error,
+                )
+                return DeployOutcome(
+                    False,
+                    DeployStatus.WAITING_FOR_USER.value,
+                    port=recovered_port,
+                    error=health.error,
+                    stage="HEALTH_CHECK",
+                    blocked=True,
+                    patches=attempts,
+                    duration_s=round(time.monotonic() - started, 1),
+                    url=recovered_url,
+                )
             containers = await runner.compose_ps(compose_path, name_for_compose)
-            _record_containers(project_id, containers, host_port, settings)
-            _set_status(project_id, DeployStatus.RUNNING.value, f"recovered after AI repair -> {url}")
+            _record_containers(project_id, containers, recovered_port, settings)
+            _set_status(
+                project_id, DeployStatus.RUNNING.value, f"recovered after AI repair -> {recovered_url}"
+            )
             await ctx.log("deployment recovered after an AI-assisted repair")
             return DeployOutcome(
                 True,
                 DeployStatus.RUNNING.value,
-                port=host_port,
-                http_status=200,
+                port=recovered_port,
+                http_status=health.status_code,
                 patches=attempts,
                 duration_s=round(time.monotonic() - started, 1),
                 containers=[c.raw for c in containers],
-                url=url,
+                url=recovered_url,
             )
         _set_status(
             project_id,

@@ -16,6 +16,7 @@ from pathlib import Path
 
 import httpx
 
+from engine.core.http import build_async_client
 from engine.core.paths import UnsafePath
 from engine.project_importer.archive import ArchiveRejected, ExtractStats, extract_zip
 from engine.project_importer.repo_url import RepoRef
@@ -79,7 +80,7 @@ def _headers(token: str | None) -> dict[str, str]:
 
 async def fetch_metadata(ref: RepoRef, token: str | None = None, timeout: float = 30.0) -> RepoMetadata:
     """Look up repository facts. Falls back to a minimal record on API failure."""
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async with build_async_client(timeout=timeout, follow_redirects=True) as client:
         try:
             resp = await client.get(ref.api_url, headers=_headers(token))
         except httpx.HTTPError as exc:
@@ -208,7 +209,7 @@ async def download_source(
     total = 0
     digest = hashlib.sha256()
     try:
-        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+        async with build_async_client(timeout=120.0, follow_redirects=True) as client:
             async with client.stream("GET", url, headers=_headers(token)) as resp:
                 if resp.status_code == 404:
                     raise ImportFailed(f"source archive not found for {ref.slug}@{branch}")

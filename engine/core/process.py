@@ -8,6 +8,7 @@ a transcript file so a run can be audited or replayed.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
 import sys
@@ -106,9 +107,28 @@ async def run_command(
             lines.append(line)
             if handle is not None:
                 handle.write(line + "\n")
-                handle.flush()
+                # Flushing per line kept the transcript exact but cost a syscall for
+                # every line; the handle is closed in the finally block below.
             if on_line is not None:
-                await on_line(line)
+                # Each sink call commits a TaskLog row. Doing that for every single
+                # line of a long `docker compose build` blocked the event loop on the
+                # SQLite write lock and froze the whole UI, so lines are coalesced.
+                await _emit(line)
+
+    pending: list[str] = []
+
+    async def _emit(line: str) -> None:
+        pending.append(line)
+        if len(pending) >= 25:
+            await _drain()
+
+    async def _drain() -> None:
+        if not pending or on_line is None:
+            pending.clear()
+            return
+        batch = "\n".join(pending)
+        pending.clear()
+        await on_line(batch)
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -136,6 +156,7 @@ async def run_command(
             asyncio.gather(pump(proc.stdout, out_buf, ""), pump(proc.stderr, err_buf, "")),
             timeout=timeout,
         )
+        await _drain()
         await asyncio.wait_for(proc.wait(), timeout=30)
     except asyncio.TimeoutError:
         timed_out = True
@@ -145,6 +166,17 @@ async def run_command(
         except asyncio.TimeoutError:
             pass
         lines.append("! command timed out")
+        with contextlib.suppress(Exception):
+            await _drain()
+    except asyncio.CancelledError:
+        # A cancelled task must not leave its child running: `docker compose up`
+        # would keep building and holding the port after the task showed cancelled.
+        with contextlib.suppress(ProcessLookupError, OSError):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(proc.wait(), timeout=15)
+        lines.append("! command cancelled")
+        raise
     finally:
         if handle is not None:
             handle.write(f"[exit {proc.returncode}]\n")

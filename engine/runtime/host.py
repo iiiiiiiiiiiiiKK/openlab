@@ -12,7 +12,6 @@ the machine so the workbench stays useful. This is never silent:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import signal

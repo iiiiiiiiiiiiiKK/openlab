@@ -77,7 +77,9 @@ async def update_settings(request: Request, body: SettingsUpdate) -> dict:
             setattr(settings, key, data[key])
     if "max_parallel_deployments" in data and data["max_parallel_deployments"]:
         scheduler = state.scheduler
-        scheduler.config.max_concurrency = max(1, int(data["max_parallel_deployments"]))
+        # Workers are created once in start(); changing only config made status()
+        # report a new concurrency that was never actually running.
+        await scheduler.set_concurrency(int(data["max_parallel_deployments"]))
     with session_scope() as session:
         for key, value in data.items():
             if value is None:

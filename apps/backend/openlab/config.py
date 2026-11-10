@@ -81,7 +81,15 @@ def get_settings() -> Settings:
     settings.data_dir = Path(settings.data_dir).expanduser().resolve()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     layout = settings.resolve_data()
-    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(layout.browsers_dir))
+    # Only point Playwright at OPENLAB's own browser folder when a Chromium build is
+    # actually there. Unconditionally setting it redirected Playwright away from a
+    # working global install and every preview/exploration failed with
+    # "Executable doesn't exist at <data>/browsers/chromium-.../chrome.exe".
+    managed = layout.browsers_dir
+    if any(child.is_dir() and child.name.startswith("chromium") for child in managed.iterdir()):
+        existing = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+        if not existing or Path(existing) == managed:
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(managed)
     return settings
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,7 +18,6 @@ from engine.browser_automation.explorer import (
     validate_model_plan,
     PLAN_PROMPT_SYSTEM,
 )
-from engine.browser_automation.inspector import inspect_page
 from engine.browser_automation.launcher import (
     BrowserSession,
     BrowserUnavailable,
@@ -39,7 +39,6 @@ from openlab.models import (
     ExplorationResult,
     ExplorationStep,
     Project,
-    ProjectEnvironment,
 )
 from engine.task_scheduler.scheduler import TaskContext
 
@@ -466,7 +465,12 @@ async def create_browser_session(layout, project_id: str, name: str, url: str, t
     ensure_artifact_temp(layout.tmp_dir)
     storage_dir = layout.project_dir(project_id) / "browser-sessions"
     storage_dir.mkdir(parents=True, exist_ok=True)
-    storage_path = storage_dir / f"{name}.json"
+    # `name` comes straight from the request body: without sanitising it, "../../x"
+    # wrote a session file anywhere on the host.
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", str(name or "default")).strip(".-")[:64] or "default"
+    storage_path = (storage_dir / f"{safe_name}.json").resolve()
+    if storage_dir.resolve() not in storage_path.parents:
+        raise ValueError(f"invalid browser session name: {name!r}")
     options = LaunchOptions(
         headless=False,
         viewport=get_viewport("desktop"),

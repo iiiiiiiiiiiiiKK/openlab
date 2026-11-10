@@ -109,12 +109,28 @@ async def capture(page, spec: CaptureSpec, target_dir: Path) -> CaptureResult:
 
     path = target_dir / spec.filename
     raw: bytes
-    if spec.selector:
-        locator = page.locator(spec.selector).first
-        await locator.wait_for(state="visible", timeout=15_000)
-        raw = await locator.screenshot(path=str(path), type="png")
-    else:
-        raw = await page.screenshot(path=str(path), full_page=spec.full_page, type="png")
+    # Screenshots wait for fonts and layout and can exceed the context default when the
+    # machine is busy (a full test run opens several browsers). Give them room and retry
+    # once instead of failing an otherwise good capture.
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            if spec.selector:
+                locator = page.locator(spec.selector).first
+                await locator.wait_for(state="visible", timeout=15_000)
+                raw = await locator.screenshot(path=str(path), type="png", timeout=60_000)
+            else:
+                raw = await page.screenshot(
+                    path=str(path), full_page=spec.full_page, type="png", timeout=60_000
+                )
+            break
+        except Exception as exc:  # noqa: BLE001 - retried once, then surfaced
+            last_error = exc
+            if attempt == 1:
+                raise
+            await page.wait_for_timeout(500)
+    else:  # pragma: no cover - defensive
+        raise RuntimeError(f"screenshot failed: {last_error}")
 
     width, height = png_dimensions(raw)
     ratio = parse_ratio(spec.aspect_ratio)

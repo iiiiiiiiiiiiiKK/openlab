@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 
 from sqlalchemy import select
 
-from engine.ai_agent.client import AIClient
 from engine.core.security import SecretBox
 from engine.report_generator.report import ReportInput, WrittenReport, write_reports
 
@@ -31,6 +28,36 @@ from openlab.models import (
 
 def _iso(value) -> str | None:
     return value.isoformat() if value else None
+
+
+def _probe_http_status(port: int | None, timeout: float = 5.0) -> int | None:
+    """Ask the running service for its real status code; None when it does not answer.
+
+    Reports used to print "answered HTTP health checks (status 200)" purely because
+    the project row said RUNNING. Anything written into a report has to be observed.
+    """
+    if not port:
+        return None
+    import socket
+
+    connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    connection.settimeout(timeout)
+    try:
+        connection.connect(("127.0.0.1", int(port)))
+    except OSError:
+        return None
+    finally:
+        connection.close()
+    try:
+        import urllib.error
+        import urllib.request
+
+        with urllib.request.urlopen(f"http://127.0.0.1:{int(port)}/", timeout=timeout) as response:
+            return int(response.status)
+    except urllib.error.HTTPError as exc:  # 4xx/5xx still proves the service answered
+        return int(exc.code)
+    except Exception:  # noqa: BLE001 - a probe must never break report generation
+        return None
 
 
 def collect_report_input(project_id: str, box: SecretBox) -> ReportInput:
@@ -101,7 +128,9 @@ def collect_report_input(project_id: str, box: SecretBox) -> ReportInput:
             "status": project.deploy_status,
             "stage": project.deploy_status,
             "port": port,
-            "http_status": 200 if running else None,
+            # The status code is probed, never assumed: asserting "HTTP 200" from the
+            # deploy flag alone turned the report into a claim nothing had verified.
+            "http_status": _probe_http_status(port) if running else None,
             "url": f"http://127.0.0.1:{port}" if port and running else None,
             "error": project.last_error,
             "blocked": project.deploy_status in ("WAITING_FOR_USER",),

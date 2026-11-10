@@ -542,4 +542,7 @@ async def restore_project_snapshot(request: Request, project_id: str, snapshot_i
 @router.get("/{project_id}/usage")
 async def project_usage(request: Request, project_id: str) -> dict:
     client = request.app.state.ai_client()
-    return client.usage_summary(project_id=project_id)
+    try:
+        return client.usage_summary(project_id=project_id)
+    finally:
+        client.session.close()
