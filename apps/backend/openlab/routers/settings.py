@@ -63,9 +63,15 @@ async def update_settings(request: Request, body: SettingsUpdate) -> dict:
     data = body.model_dump(exclude_unset=True)
     if data.pop("clear_github_token", False):
         state.secret_store.pop("github_token", None)
+        from openlab.app import persist_github_token
+
+        persist_github_token(None, state.box)
     token = data.pop("github_token", None)
     if token:
         state.secret_store["github_token"] = token
+        from openlab.app import persist_github_token
+
+        persist_github_token(token, state.box)
     for key in EDITABLE:
         if key in data and data[key] is not None:
             setattr(settings, key, data[key])

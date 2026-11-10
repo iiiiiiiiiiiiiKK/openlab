@@ -81,6 +81,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     len(reconciled["demoted"]),
                     ", ".join(item["name"] or item["project_id"][:8] for item in reconciled["demoted"]),
                 )
+            # Reload persisted GitHub credentials after database initialization.
+            app.state.secret_store = _load_secret_store(box)
         except Exception:  # noqa: BLE001 - never block startup on this
             log.exception("could not reconcile runtime state")
         log.info("OPENLAB backend ready on http://%s:%s", settings.bind_host, settings.port)

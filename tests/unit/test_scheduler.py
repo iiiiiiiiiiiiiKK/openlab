@@ -191,6 +191,92 @@ async def _any_succeeded() -> bool:
         )
 
 
+async def test_higher_priority_queued_task_runs_first(db) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    order: list[str] = []
+
+    async def handler(ctx: TaskContext) -> dict:
+        label = str(ctx.payload["label"])
+        if label == "first":
+            started.set()
+            await release.wait()
+        order.append(label)
+        return {}
+
+    scheduler = await _make_scheduler({"priority": handler})
+    try:
+        first = await scheduler.submit("priority", payload={"label": "first"}, priority=0)
+        await asyncio.wait_for(started.wait(), timeout=5)
+        low = await scheduler.submit("priority", payload={"label": "low"}, priority=1)
+        high = await scheduler.submit("priority", payload={"label": "high"}, priority=10)
+        release.set()
+        assert await _wait_for(lambda: _all_succeeded([first, low, high]))
+        assert order == ["first", "high", "low"]
+    finally:
+        release.set()
+        await scheduler.stop()
+
+
+async def _all_succeeded(task_ids: list[str]) -> bool:
+    return all([await _task_status(task_id) == "succeeded" for task_id in task_ids])
+
+
+async def test_equal_priority_tasks_preserve_fifo_order(db) -> None:
+    gate = asyncio.Event()
+    started = asyncio.Event()
+    order: list[str] = []
+
+    async def handler(ctx: TaskContext) -> dict:
+        label = str(ctx.payload["label"])
+        if label == "first":
+            started.set()
+            await gate.wait()
+        order.append(label)
+        return {}
+
+    scheduler = await _make_scheduler({"fifo": handler})
+    try:
+        first = await scheduler.submit("fifo", payload={"label": "first"})
+        await asyncio.wait_for(started.wait(), timeout=5)
+        second = await scheduler.submit("fifo", payload={"label": "second"}, priority=4)
+        third = await scheduler.submit("fifo", payload={"label": "third"}, priority=4)
+        gate.set()
+        assert await _wait_for(lambda: _all_succeeded([first, second, third]))
+        assert order == ["first", "second", "third"]
+    finally:
+        gate.set()
+        await scheduler.stop()
+
+
+async def test_shutdown_requeues_interrupted_running_task(db) -> None:
+    started = asyncio.Event()
+    calls = 0
+
+    async def handler(ctx: TaskContext) -> dict:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started.set()
+            await asyncio.Event().wait()
+        return {"calls": calls}
+
+    scheduler = await _make_scheduler({"shutdown": handler})
+    task_id = await scheduler.submit("shutdown")
+    await asyncio.wait_for(started.wait(), timeout=5)
+    await scheduler.stop()
+    assert await _task_status(task_id) == "queued"
+
+    fresh = TaskScheduler(SchedulerConfig(max_concurrency=1))
+    fresh.register("shutdown", handler)
+    await fresh.start()
+    try:
+        assert await _wait_for(lambda: _is_succeeded(task_id), timeout=10)
+        assert calls == 2
+    finally:
+        await fresh.stop()
+
+
 async def test_scheduler_reports_status(db) -> None:
     scheduler = await _make_scheduler({"x": lambda ctx: None}, concurrency=2)
     try:

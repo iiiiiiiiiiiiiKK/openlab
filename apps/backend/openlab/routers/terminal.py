@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
 
 from engine.core.security import redact
@@ -19,15 +19,25 @@ LOG_FILES = {
     "deploy": "deploy.log",
     "build": "deploy.log",
     "browser": "browser.log",
+    "host-install": "host-install.log",
+    "host-runtime": "host-runtime.log",
 }
 
 
 @router.get("/{project_id}/logs")
-async def project_logs(request: Request, project_id: str, name: str = "deploy", tail: int = 500) -> dict:
+async def project_logs(
+    request: Request,
+    project_id: str,
+    name: str = Query("deploy", pattern=r"^(deploy|build|browser|host-install|host-runtime)$"),
+    tail: int = Query(500, ge=1, le=5000),
+) -> dict:
     settings = request.app.state.settings
     layout = settings.resolve_data()
-    filename = LOG_FILES.get(name, name)
-    path = layout.logs_dir(project_id) / filename
+    filename = LOG_FILES[name]
+    log_dir = layout.logs_dir(project_id).resolve()
+    path = (log_dir / filename).resolve()
+    if path.parent != log_dir:
+        raise HTTPException(status_code=400, detail="invalid log name")
     if not path.exists():
         return {"name": filename, "lines": [], "exists": False}
     try:

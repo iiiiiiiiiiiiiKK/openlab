@@ -91,14 +91,38 @@ def test_import_local_folder_then_read_project(client: TestClient, fixtures_dir:
     assert "openlab-fixture-node" in file_payload["content"]
 
 
-def test_tree_rejects_path_traversal(client: TestClient, fixtures_dir: Path) -> None:
+def test_project_logs_reject_paths_outside_log_directory(client: TestClient, fixtures_dir: Path) -> None:
     project_id = client.post(
-        "/api/projects/import/local", json={"path": str(fixtures_dir / "python-web")}
+        "/api/projects/import/local", json={"path": str(fixtures_dir / "node-web")}
     ).json()["project_id"]
-    response = client.get(f"/api/projects/{project_id}/tree?path=../../..")
+    settings = client.app.state.settings
+    log_dir = settings.resolve_data().logs_dir(project_id)
+    (log_dir / "deploy.log").write_text("deploy log\n", encoding="utf-8")
+
+    assert client.get(f"/api/projects/{project_id}/logs?name=deploy").json()["lines"] == ["deploy log"]
+    assert client.get(f"/api/projects/{project_id}/logs?name=host-runtime").status_code == 200
+    assert client.get(f"/api/projects/{project_id}/logs?name=..%2F..%2F..%2F..%2FREADME.md").status_code == 422
+    assert client.get(f"/api/projects/{project_id}/logs?name=C%3A%5CWindows%5Cwin.ini").status_code == 422
+    assert client.get(f"/api/projects/{project_id}/logs?name=deploy%2F..%2F..%2FREADME.md").status_code == 422
+    assert client.get(f"/api/projects/{project_id}/logs?name=deploy&tail=0").status_code == 422
+
+
+def test_project_log_symlink_cannot_escape_log_directory(client: TestClient, fixtures_dir: Path, tmp_path: Path) -> None:
+    project_id = client.post(
+        "/api/projects/import/local", json={"path": str(fixtures_dir / "node-web")}
+    ).json()["project_id"]
+    outside = tmp_path / "outside.log"
+    outside.write_text("secret outside project\n", encoding="utf-8")
+    log_dir = client.app.state.settings.resolve_data().logs_dir(project_id)
+    try:
+        (log_dir / "deploy.log").symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is not available for this account/platform")
+    response = client.get(f"/api/projects/{project_id}/logs?name=deploy")
     assert response.status_code == 400
-    response = client.get(f"/api/projects/{project_id}/file?path=../secrets/master.key")
-    assert response.status_code == 400
+    assert "secret outside project" not in response.text
+
+
 
 
 def test_import_zip(client: TestClient, fixtures_dir: Path, tmp_path: Path) -> None:
@@ -176,9 +200,23 @@ def test_settings_roundtrip(client: TestClient) -> None:
     tokenized = client.patch("/api/settings", json={"github_token": "ghp_abcdefghijklmnopqrstuvwxyz"}).json()
     assert tokenized["has_github_token"] is True
     assert "ghp_abcdefghijklmnopqrstuvwxyz" not in json.dumps(tokenized)
+    from openlab.db import session_scope
+    from openlab.models import AppSetting
+
+    with session_scope() as session:
+        stored = session.query(AppSetting).filter(AppSetting.key == "github_token").one()
+        encrypted_token = stored.value["enc"]
+    assert "ghp_abcdefghijklmnopqrstuvwxyz" not in encrypted_token
+    client.app.state.secret_store.pop("github_token", None)
+    from openlab.app import _load_secret_store
+
+    client.app.state.secret_store.update(_load_secret_store(client.app.state.box))
+    assert client.app.state.secret_store["github_token"] == "ghp_abcdefghijklmnopqrstuvwxyz"
 
     cleared = client.patch("/api/settings", json={"clear_github_token": True}).json()
     assert cleared["has_github_token"] is False
+    with session_scope() as session:
+        assert session.query(AppSetting).filter(AppSetting.key == "github_token").one_or_none() is None
 
 
 def test_deploy_without_docker_waits_for_user(client: TestClient, fixtures_dir: Path) -> None:

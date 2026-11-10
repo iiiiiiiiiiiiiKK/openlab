@@ -65,6 +65,7 @@ Write-Ok "venv ready"
 Write-Step "Installing Python dependencies"
 & $venvPython -m pip install --upgrade pip --quiet
 & $venvPython -m pip install -r (Join-Path $root "requirements.txt") --quiet
+if ($LASTEXITCODE -ne 0) { throw "Python dependency installation failed (exit $LASTEXITCODE)." }
 Write-Ok "backend dependencies installed"
 
 Write-Step "Ensuring Playwright Chromium is available"
@@ -85,13 +86,17 @@ if (-not $SkipWeb) {
     if (-not (Test-Path (Join-Path $webDir "node_modules"))) {
         Write-Step "Installing web dependencies"
         Push-Location $webDir
-        npm install --no-audit --no-fund
-        Pop-Location
+        try {
+            npm ci --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { throw "Web dependency installation failed (exit $LASTEXITCODE)." }
+        } finally { Pop-Location }
     }
     Write-Step "Building the web UI"
     Push-Location $webDir
-    npm run build
-    Pop-Location
+    try {
+        npm run build
+        if ($LASTEXITCODE -ne 0) { throw "Web build failed (exit $LASTEXITCODE)." }
+    } finally { Pop-Location }
     Write-Ok "web UI built into apps/web/dist"
 }
 

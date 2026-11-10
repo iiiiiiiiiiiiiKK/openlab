@@ -29,6 +29,7 @@ from engine.docker_manager.generator import (
     generate_compose,
     generate_dockerfile,
     guard_compose_text,
+    normalize_compose_build_contexts,
     required_service_containers,
     write_compose,
 )
@@ -163,6 +164,12 @@ async def prepare_environment(
             problems = guard_compose_text(text)
             if problems:
                 raise PolicyViolation("; ".join(problems))
+            text = normalize_compose_build_contexts(
+                text,
+                existing.parent,
+                workspace_dir,
+                output_compose_dir=layout.project_dir(project_id) / "docker",
+            )
             compose_path = write_compose(project_id_dir(layout, project_id), compose_target_name, text)
             await ctx.log(f"using repository compose file: {existing.name}")
         else:

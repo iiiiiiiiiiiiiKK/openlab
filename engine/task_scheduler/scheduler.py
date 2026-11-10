@@ -67,7 +67,9 @@ class TaskScheduler:
     def __init__(self, config: SchedulerConfig | None = None) -> None:
         self.config = config or SchedulerConfig()
         self._handlers: dict[str, TaskHandler] = {}
-        self._queue: asyncio.Queue[str] = asyncio.Queue()
+        # Highest persisted priority runs first; sequence keeps FIFO ordering for ties.
+        self._queue: asyncio.PriorityQueue[tuple[int, int, str]] = asyncio.PriorityQueue()
+        self._queue_sequence = 0
         self._running: dict[str, asyncio.Task] = {}
         self._workers: list[asyncio.Task] = []
         self._stopping = False
@@ -103,9 +105,13 @@ class TaskScheduler:
             task.cancel()
         self._running.clear()
 
+    def _enqueue(self, task_id: str, priority: int) -> None:
+        self._queue_sequence += 1
+        self._queue.put_nowait((-int(priority), self._queue_sequence, task_id))
+
     async def requeue_pending(self) -> int:
-        """Restore queue state after a restart: running tasks go back to queued."""
-        task_ids: list[str] = []
+        """Restore queued tasks in priority order; interrupted running tasks retry."""
+        queued: list[tuple[int, datetime, str]] = []
         with session_scope() as session:
             rows = list(
                 session.scalars(
@@ -117,12 +123,12 @@ class TaskScheduler:
                     row.status = "queued"
                     row.message = "requeued after restart"
                 row.cancel_requested = False
-                task_ids.append(row.id)
-        for task_id in task_ids:
-            await self._queue.put(task_id)
-        if task_ids:
-            log.info("requeued %d task(s) after restart", len(task_ids))
-        return len(task_ids)
+                queued.append((int(row.priority or 0), row.created_at or datetime.min.replace(tzinfo=timezone.utc), row.id))
+        for priority, _created_at, task_id in sorted(queued, key=lambda item: (-item[0], item[1], item[2])):
+            self._enqueue(task_id, priority)
+        if queued:
+            log.info("requeued %d task(s) after restart", len(queued))
+        return len(queued)
 
     # -- queue operations -------------------------------------------------
     async def submit(
@@ -144,7 +150,7 @@ class TaskScheduler:
             session.add(task)
             session.flush()
             task_id = task.id
-        await self._queue.put(task_id)
+        self._enqueue(task_id, priority)
         bus.publish(
             "task.queued",
             {"task_id": task_id, "kind": kind, "project_id": project_id},
@@ -189,7 +195,8 @@ class TaskScheduler:
                 return False
             task.status = TaskStatus.QUEUED.value
             task.message = "resumed by user"
-        await self._queue.put(task_id)
+            priority = int(task.priority or 0)
+        self._enqueue(task_id, priority)
         bus.publish("task.queued", {"task_id": task_id, "resumed": True})
         return True
 
@@ -282,7 +289,7 @@ class TaskScheduler:
     async def _worker(self, index: int) -> None:
         while not self._stopping:
             try:
-                task_id = await self._queue.get()
+                task_id = (await self._queue.get())[2]
             except asyncio.CancelledError:
                 return
             try:
@@ -334,14 +341,26 @@ class TaskScheduler:
             with session_scope() as session:
                 row = session.get(ProjectTask, task_id)
                 cancelled_by_user = False
+                shutting_down = self._stopping
                 if row is not None:
                     cancelled_by_user = row.cancel_requested
-                    row.status = (
-                        TaskStatus.CANCELLED.value if cancelled_by_user else TaskStatus.PAUSED.value
-                    )
-                    row.finished_at = datetime.now(timezone.utc)
-                    row.message = "cancelled" if cancelled_by_user else "paused"
-            bus.publish("task.cancelled" if cancelled_by_user else "task.paused", {"task_id": task_id})
+                    if shutting_down and not cancelled_by_user:
+                        # Server shutdown is not a user pause: leave the durable task
+                        # queued so the next process can resume it automatically.
+                        row.status = TaskStatus.QUEUED.value
+                        row.cancel_requested = False
+                        row.finished_at = None
+                        row.message = "requeued after shutdown"
+                    else:
+                        row.status = (
+                            TaskStatus.CANCELLED.value if cancelled_by_user else TaskStatus.PAUSED.value
+                        )
+                        row.finished_at = datetime.now(timezone.utc)
+                        row.message = "cancelled" if cancelled_by_user else "paused"
+            if shutting_down and not cancelled_by_user:
+                bus.publish("task.queued", {"task_id": task_id, "resumed": True})
+            else:
+                bus.publish("task.cancelled" if cancelled_by_user else "task.paused", {"task_id": task_id})
         except Exception as exc:  # noqa: BLE001 - surfaced to the UI
             message = redact(str(exc))[:4000]
             trace = redact(traceback.format_exc())[:8000]

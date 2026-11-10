@@ -12,8 +12,11 @@ capabilities, mount no host paths, and mount no Docker socket.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
+
+import yaml
 
 from engine.project_analyzer.planner import RunPlan
 
@@ -23,17 +26,45 @@ SECURITY_BASELINE = {
     "read_only_root": False,
 }
 
-FORBIDDEN_MOUNTS = (
-    "/var/run/docker.sock",
-    "\\\\.\\pipe\\docker_engine",
-    "C:\\",
-    "/",
-    "~",
-)
 
 
 class PolicyViolation(ValueError):
     """Raised when a generated or user-provided environment breaks policy."""
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects aliases and ambiguous duplicate keys."""
+
+    def compose_node(self, parent, index):
+        if self.check_event(yaml.AliasEvent):
+            raise yaml.YAMLError("YAML aliases are not allowed in compose files")
+        return super().compose_node(parent, index)
+
+    def construct_mapping(self, node, deep=False):
+        if not isinstance(node, yaml.MappingNode):
+            raise yaml.constructor.ConstructorError(
+                None, None, "expected a mapping node", node.start_mark
+            )
+        self.flatten_mapping(node)
+        mapping = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if not isinstance(key, str):
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a compose mapping",
+                    node.start_mark,
+                    "compose mapping keys must be strings",
+                    key_node.start_mark,
+                )
+            if key in mapping:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a compose mapping",
+                    node.start_mark,
+                    f"duplicate compose key {key!r}",
+                    key_node.start_mark,
+                )
+            mapping[key] = self.construct_object(value_node, deep=deep)
+        return mapping
 
 
 def container_name_for(project_name: str, service: str = "app") -> str:
@@ -129,7 +160,16 @@ def generate_compose(
     """Render a compose file with resource limits and no host mounts."""
     name = container_name_for(plan.project_name)
     net = network_name_for(plan.project_name)
-    env_lines = [f"      - {var['name']}=${{{var['name']}:-}}" for var in plan.env_vars if var.get("name")]
+    env_lines: list[str] = []
+    for var in plan.env_vars:
+        key = str(var.get("name") or "")
+        if not key:
+            continue
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise PolicyViolation(f"invalid environment variable name: {key!r}")
+        required = bool(var.get("required"))
+        expression = f"${{{key}:?OPENLAB requires {key}}}" if required else f"${{{key}:-}}"
+        env_lines.append(f'      {key}: "{expression}"')
     env_block = "\n".join(["    environment:"] + env_lines) if env_lines else ""
 
     services: list[str] = []
@@ -203,22 +243,269 @@ def generate_compose(
     )
 
 
+def _is_host_path(source: str) -> bool:
+    """Conservatively recognize bind-like sources in Compose short syntax."""
+    source = source.strip()
+    if not source:
+        return True
+    if "${" in source or "$" in source:
+        return True
+    if re.match(r"^(/|\\\\|[a-z]:[/\\\\])", source, re.IGNORECASE):
+        return True
+    if source.startswith("~") or "/" in source or "\\\\" in source:
+        return True
+    if source in {".", ".."}:
+        return True
+    return False
+
+
+def _is_absolute_path(source: str) -> bool:
+    source = source.strip()
+    return (
+        source.startswith(("/", "\\\\"))
+        or bool(re.match(r"^[a-z]:[/\\\\]", source, re.IGNORECASE))
+        or Path(source).is_absolute()
+    )
+
+
+def _compose_error(message: str) -> list[str]:
+    return [f"invalid or unsafe compose file: {message}"]
+
+
+def _load_compose_document(text: str) -> tuple[dict | None, list[str]]:
+    if not isinstance(text, str) or not text.strip():
+        return None, _compose_error("file is empty")
+    try:
+        documents = list(yaml.load_all(text, Loader=_UniqueKeySafeLoader))
+    except yaml.YAMLError as exc:
+        return None, _compose_error(str(exc).splitlines()[0][:300])
+    if len(documents) != 1 or not isinstance(documents[0], dict):
+        return None, _compose_error("expected exactly one YAML mapping document")
+    return documents[0], []
+
+
+def _named_volume_definitions(document: dict, problems: list[str]) -> set[str]:
+    volumes = document.get("volumes", {})
+    if volumes is None:
+        return set()
+    if not isinstance(volumes, dict):
+        problems.append("top-level volumes must be a mapping")
+        return set()
+
+    allowed: set[str] = set()
+    for name, config in volumes.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name):
+            problems.append(f"invalid named volume {name!r}")
+            continue
+        if config is None:
+            config = {}
+        if not isinstance(config, dict):
+            problems.append(f"volume {name!r} has an invalid definition")
+            continue
+        if config.get("external"):
+            problems.append(f"external volume {name!r} is not allowed")
+        driver = config.get("driver")
+        if driver not in (None, "local"):
+            problems.append(f"volume {name!r} uses unsupported driver {driver!r}")
+        if config.get("driver_opts"):
+            problems.append(f"volume {name!r} uses driver_opts, which may expose host paths")
+        allowed.add(name)
+    return allowed
+
+
+def _reject_file_backed_secrets(document: dict, problems: list[str]) -> None:
+    for kind in ("secrets", "configs"):
+        entries = document.get(kind, {}) or {}
+        if not isinstance(entries, dict):
+            problems.append(f"top-level {kind} must be a mapping")
+            continue
+        for name, config in entries.items():
+            if config is None:
+                continue
+            if not isinstance(config, dict):
+                problems.append(f"{kind[:-1]} {name!r} has an invalid definition")
+                continue
+            if "file" in config:
+                problems.append(f"file-backed {kind} {name!r} can expose host files and is not allowed")
+            if config.get("external"):
+                problems.append(f"external {kind} {name!r} are not allowed")
+
+
+def normalize_compose_build_contexts(
+    text: str,
+    source_compose_dir: Path,
+    workspace_dir: Path,
+    output_compose_dir: Path | None = None,
+) -> str:
+    """Pin all build contexts to the project's writable workspace.
+
+    Compose files are copied into OPENLAB's data directory before execution. This
+    rewrites repository-relative build contexts against their original workspace
+    location so `build: .` still means the project, never OPENLAB_DATA itself.
+    """
+    document, errors = _load_compose_document(text)
+    if errors or document is None:
+        raise PolicyViolation("; ".join(errors))
+    source_compose_dir = Path(source_compose_dir).resolve()
+    output_compose_dir = Path(output_compose_dir or source_compose_dir).resolve()
+    workspace = Path(workspace_dir).resolve()
+    services = document.get("services")
+    if not isinstance(services, dict):
+        raise PolicyViolation("compose services must be a mapping")
+
+    for service_name, service in services.items():
+        if not isinstance(service, dict) or "build" not in service:
+            continue
+        build = service["build"]
+        if isinstance(build, str):
+            build = {"context": build}
+            service["build"] = build
+        if not isinstance(build, dict):
+            raise PolicyViolation(f"service {service_name!r} has invalid build configuration")
+        if build.get("additional_contexts"):
+            raise PolicyViolation(f"service {service_name!r}: additional build contexts are not allowed")
+        if build.get("ssh"):
+            raise PolicyViolation(f"service {service_name!r}: forwarding SSH credentials during build is not allowed")
+        context = build.get("context", ".")
+        if not isinstance(context, str) or "${" in context:
+            raise PolicyViolation(f"service {service_name!r}: dynamic build contexts are not allowed")
+        context_path = (source_compose_dir / context).resolve()
+        if context_path != workspace and workspace not in context_path.parents:
+            raise PolicyViolation(f"service {service_name!r}: build context escapes the project workspace")
+        if not context_path.is_dir():
+            raise PolicyViolation(f"service {service_name!r}: build context is not a directory")
+        build["context"] = os.path.relpath(context_path, output_compose_dir).replace(os.sep, "/") or "."
+
+        dockerfile = build.get("dockerfile")
+        if dockerfile is not None:
+            if not isinstance(dockerfile, str) or "${" in dockerfile or Path(dockerfile).is_absolute():
+                raise PolicyViolation(f"service {service_name!r}: invalid dockerfile path")
+            dockerfile_path = (context_path / dockerfile).resolve()
+            if dockerfile_path != context_path and context_path not in dockerfile_path.parents:
+                raise PolicyViolation(f"service {service_name!r}: dockerfile escapes its build context")
+            if not dockerfile_path.is_file():
+                raise PolicyViolation(f"service {service_name!r}: Dockerfile was not found in build context")
+            build["dockerfile"] = Path(os.path.relpath(dockerfile_path, context_path)).as_posix()
+
+    return yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
+
+
 def guard_compose_text(text: str) -> list[str]:
-    """Return policy violations found in a compose file (empty when clean)."""
-    lowered = (text or "").lower()
+    """Validate untrusted compose YAML against OPENLAB's no-host-mount policy.
+
+    This intentionally accepts a conservative subset: service bind mounts,
+    external volumes, Compose file composition and privilege-escalation options
+    are rejected. Named volumes declared and used by the project are allowed.
+    """
+    document, errors = _load_compose_document(text)
+    if errors or document is None:
+        return errors
+
     problems: list[str] = []
-    if "privileged: true" in lowered or "privileged:true" in lowered:
-        problems.append("privileged containers are not allowed")
-    if "docker.sock" in lowered:
+    if "include" in document or "extends" in document:
+        problems.append("compose include/extends is not allowed for untrusted repositories")
+    services = document.get("services")
+    if not isinstance(services, dict) or not services:
+        return _compose_error("services must be a non-empty mapping")
+    allowed_volume_names = _named_volume_definitions(document, problems)
+    _reject_file_backed_secrets(document, problems)
+
+    for service_name, service in services.items():
+        if not isinstance(service, dict):
+            problems.append(f"service {service_name!r} must be a mapping")
+            continue
+        label = f"service {service_name!r}"
+        if service.get("extends") or service.get("include"):
+            problems.append(f"{label}: extends/include is not allowed for untrusted repositories")
+        privileged = service.get("privileged", False)
+        if privileged is True or (isinstance(privileged, str) and privileged.lower() == "true"):
+            problems.append(f"{label}: privileged containers are not allowed")
+        for field_name in ("network_mode", "pid", "ipc", "uts_mode", "userns_mode", "cgroup"):
+            mode = service.get(field_name)
+            if isinstance(mode, str) and mode.strip().lower() == "host":
+                if field_name == "network_mode":
+                    problems.append(f"{label}: network_mode: host is not allowed")
+                elif field_name in ("pid", "ipc"):
+                    problems.append(f"{label}: sharing host PID/IPC namespaces is not allowed")
+                else:
+                    problems.append(f"{label}: {field_name}: host is not allowed")
+        if service.get("devices") or service.get("device_cgroup_rules") or service.get("device_requests"):
+            problems.append(f"{label}: device access is not allowed")
+        if service.get("volumes_from"):
+            problems.append(f"{label}: volumes_from is not allowed")
+        if service.get("cap_add"):
+            problems.append(f"{label}: adding Linux capabilities is not allowed")
+        security_options = service.get("security_opt") or []
+        if isinstance(security_options, str):
+            security_options = [security_options]
+        if not isinstance(security_options, list):
+            problems.append(f"{label}: security_opt must be a list")
+        elif any(
+            str(option).lower().startswith(("apparmor:unconfined", "seccomp:unconfined", "label:disable"))
+            for option in security_options
+        ):
+            problems.append(f"{label}: disabling security profiles is not allowed")
+
+        build = service.get("build")
+        if build is not None:
+            if isinstance(build, str):
+                build_context = build
+                dockerfile = None
+            elif isinstance(build, dict):
+                build_context = build.get("context", ".")
+                dockerfile = build.get("dockerfile")
+            else:
+                problems.append(f"{label}: build must be a path or mapping")
+                build_context = None
+                dockerfile = None
+            if not isinstance(build_context, str) or "${" in build_context or "$" in build_context:
+                problems.append(f"{label}: dynamic build contexts are not allowed")
+            elif _is_absolute_path(build_context):
+                problems.append(f"{label}: absolute build contexts are not allowed")
+            if dockerfile is not None and (
+                not isinstance(dockerfile, str)
+                or Path(dockerfile).is_absolute()
+                or "${" in dockerfile
+                or ".." in Path(dockerfile).parts
+            ):
+                problems.append(f"{label}: unsafe dockerfile path")
+            if isinstance(build, dict) and build.get("network") == "host":
+                problems.append(f"{label}: host networking during build is not allowed")
+            if isinstance(build, dict) and (build.get("ssh") or build.get("additional_contexts")):
+                problems.append(f"{label}: build SSH forwarding/additional contexts are not allowed")
+
+        volumes = service.get("volumes", []) or []
+        if not isinstance(volumes, list):
+            problems.append(f"{label}: volumes must be a list")
+            continue
+        for volume in volumes:
+            if isinstance(volume, dict):
+                volume_type = volume.get("type")
+                source = volume.get("source")
+                if volume_type == "tmpfs":
+                    continue
+                if volume_type != "volume":
+                    problems.append(f"{label}: bind or unsupported volume types are not allowed")
+                    continue
+                if not isinstance(source, str) or source not in allowed_volume_names:
+                    problems.append(f"{label}: volume source {source!r} must be a declared named volume")
+                continue
+            if not isinstance(volume, str):
+                problems.append(f"{label}: volume entries must be strings or mappings")
+                continue
+            if re.match(r"^[a-z]:[/\\\\]", volume, re.IGNORECASE):
+                problems.append(f"{label}: Windows host bind mounts are not allowed")
+                continue
+            source = volume.split(":", 1)[0].strip()
+            if not source:
+                problems.append(f"{label}: anonymous volumes are not allowed")
+            elif "${" in source or source not in allowed_volume_names or _is_host_path(source):
+                problems.append(f"{label}: bind/undeclared volume source {source!r} is not allowed")
+
+    lowered = text.lower().replace("\\", "/")
+    if "docker.sock" in lowered or "docker_engine" in lowered or "docker engine" in lowered:
         problems.append("Docker socket mounting is not allowed")
-    for mount in ("/var/run", "/etc/", "/root", "c:\\users"):
-        if re.search(rf"-\s*[\"']?{re.escape(mount)}", lowered):
-            problems.append(f"host mount of {mount} is not allowed")
-    if re.search(r"network_mode:\s*[\"']?host", lowered):
-        problems.append("network_mode: host is not allowed")
-    if "pid: host" in lowered or "ipc: host" in lowered:
-        problems.append("sharing host PID/IPC namespaces is not allowed")
-    return problems
+    return list(dict.fromkeys(problems))
 
 
 def write_compose(project_dir: Path, filename: str, content: str) -> Path:
