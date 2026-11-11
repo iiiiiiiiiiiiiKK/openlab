@@ -42,4 +42,7 @@ const server = http.createServer((req, res) => {
   res.writeHead(200, {"content-type": "text/html"}); res.end(page);
 });
 
-server.listen(PORT, "127.0.0.1", () => console.log("fixture listening on " + PORT));
+// Bind all interfaces: inside a container the published port is only reachable when
+// the process listens on 0.0.0.0 (127.0.0.1 is container-local and Docker cannot
+// forward to it).
+server.listen(PORT, "0.0.0.0", () => console.log("fixture listening on " + PORT));

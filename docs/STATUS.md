@@ -1,7 +1,7 @@
 # OPENLAB — runtime status
 
 ```
-version    : 0.1.2
+version    : 0.1.3
 backend    : http://127.0.0.1:3210 (FastAPI, SQLite/WAL)
 data dir   : <repo>/OPENLAB_DATA
 ```
@@ -10,7 +10,7 @@ data dir   : <repo>/OPENLAB_DATA
 
 | Check | Result |
 | --- | --- |
-| `pytest tests/unit tests/integration -q` | **201 passed, 2 skipped** |
+| `pytest tests/unit tests/integration -q` | **203 passed, 3 skipped** |
 | `pytest -q` (everything, including e2e) | **206 passed, 5 skipped** |
 | `pytest tests/e2e -q -rs` | **6 passed, 2 skipped** (MP4 needs full FFmpeg; Docker compose needs a daemon) |
 | `npx tsc --noEmit` (apps/web) | clean |
@@ -62,6 +62,30 @@ assets: 8 screenshots   report: VERIFIED
 The generated project folder contained real artefacts — `screenshots/preview-desktop.png` (1440×900),
 `screenshots/step-00-goto.png`, `reports/report-v1.{md,html,json}` — and the report rendered them with
 the observed HTTP status, the step table and the console/network error summary.
+
+## Fixed in 0.1.3 — why a published port never answers
+
+A container deployment can build, start and report `healthy` while the published port still
+never answers. The cause turned out to be the application, not Docker: a server bound to
+`127.0.0.1` inside its container is reachable only from that container, so `docker-proxy` has
+nothing to forward to. This is the single most common containerisation mistake (`next start`
+without `-H 0.0.0.0`, Flask's default, `uvicorn` without `--host`).
+
+OPENLAB now probes both addresses from inside the container before it spends minutes on AI
+repair, and reports the answer instead of a bare timeout:
+
+```
+the application listens on 127.0.0.1:3000 inside the container, so the published port has
+nothing to forward to (the container address 172.22.0.2:3000 refuses connections).
+Bind the server to 0.0.0.0 instead - for example `--host 0.0.0.0`, HOST=0.0.0.0, or
+app.run(host="0.0.0.0").
+```
+
+A port with nothing listening at all is reported separately ("the process is not accepting
+HTTP on port N at all"), so the two failure modes are not confused.
+
+The bundled fixtures bound `127.0.0.1` and therefore could never work in a container; they now
+bind `0.0.0.0`.
 
 ## Fixed in 0.1.2 — Docker deployment verified against a real engine
 

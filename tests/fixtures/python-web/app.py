@@ -40,6 +40,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    # Bind all interfaces so a published container port can reach it.
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"python fixture listening on {PORT}", flush=True)
     server.serve_forever()

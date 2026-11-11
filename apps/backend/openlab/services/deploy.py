@@ -406,6 +406,12 @@ async def deploy_project(ctx: TaskContext, settings: Settings, layout, box: Secr
     if up.ok:
         await ctx.log("containers are up but the HTTP endpoint never answered", level="error")
     logs = await runner.compose_logs(compose_path, name_for_compose, tail=400)
+    # Before spending minutes on AI repair, check the single most common cause: an app
+    # that listens on 127.0.0.1 inside the container can never be reached through a
+    # published port, so the timeout says nothing useful without this probe.
+    bind_problem = await _diagnose_bind_address(runner, compose_path, name_for_compose, plan)
+    if bind_problem:
+        await ctx.log(bind_problem, level="error")
     combined = "\n".join(
         [
             "=== docker compose up ===",
@@ -414,11 +420,22 @@ async def deploy_project(ctx: TaskContext, settings: Settings, layout, box: Secr
             logs.tail(200),
             "=== health check ===",
             health.error or "",
+            "=== bind address diagnosis ===",
+            bind_problem or "not applicable",
         ]
     )
     await ctx.log(combined[-8000:], level="error")
 
-    _set_status(project_id, DeployStatus.FAILED.value, "health check failed", error=health.error)
+    failure_detail = "health check failed"
+    if bind_problem:
+        # The diagnosis is the useful part; without it the UI only shows a timeout.
+        failure_detail = f"health check failed — {bind_problem}"
+    _set_status(
+        project_id,
+        DeployStatus.FAILED.value,
+        failure_detail,
+        error=bind_problem or health.error,
+    )
     attempts: list[dict] = []
 
     ai_client = AIClient(_session(), box)
@@ -507,11 +524,14 @@ async def deploy_project(ctx: TaskContext, settings: Settings, layout, box: Secr
                 containers=[c.raw for c in containers],
                 url=recovered_url,
             )
+        exhausted_detail = "automatic repair exhausted"
+        if bind_problem:
+            exhausted_detail = f"automatic repair exhausted — {bind_problem}"
         _set_status(
             project_id,
             DeployStatus.WAITING_FOR_USER.value,
-            "automatic repair exhausted",
-            error=outcome.reason,
+            exhausted_detail,
+            error=bind_problem or outcome.reason,
         )
         await ctx.log(outcome.reason or "repair failed", level="error")
         return DeployOutcome(
@@ -527,6 +547,8 @@ async def deploy_project(ctx: TaskContext, settings: Settings, layout, box: Secr
         )
     except NoProviderConfigured as exc:
         message = f"deployment failed and no AI provider is configured for repair: {exc}"
+        if bind_problem:
+            message = f"{bind_problem} (no AI provider is configured for automatic repair)"
         await ctx.log(message, level="error")
         _set_status(project_id, DeployStatus.WAITING_FOR_USER.value, message, error=health.error)
         return DeployOutcome(
@@ -542,6 +564,72 @@ async def deploy_project(ctx: TaskContext, settings: Settings, layout, box: Secr
         )
     finally:
         ai_client.session.close()
+
+
+PROBE_SCRIPTS = {
+    "node": (
+        "const http=require('http');"
+        "http.get(process.argv[1],r=>process.exit(r.statusCode<400?0:1))"
+        ".on('error',()=>process.exit(1));"
+    ),
+    "python": (
+        "import sys,urllib.request; "
+        "sys.exit(0 if urllib.request.urlopen(sys.argv[1], timeout=3).status < 400 else 1)"
+    ),
+}
+
+
+async def _diagnose_bind_address(runner, compose_path: Path, project_name: str, plan: dict) -> str | None:
+    """Explain a published port that never answers, when the cause is the bind address.
+
+    A process that listens on 127.0.0.1 inside a container is reachable only from inside
+    that container, so Docker has nothing to forward to. Detecting it turns a bare
+    timeout into an actionable message.
+    """
+    if plan.get("project_type") not in ("node", "python"):
+        return None
+    port = plan.get("port")
+    if not port:
+        return None
+    try:
+        containers = await runner.compose_ps(compose_path, project_name)
+    except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
+        return None
+    target = next((c for c in containers if (c.service or "") in ("app", "web", "main")), None)
+    if target is None or not target.id:
+        return None
+    container_ip = await runner.container_ip(target.id)
+    if not container_ip:
+        return None
+    interpreter = "python" if plan.get("project_type") == "python" else "node"
+    script = PROBE_SCRIPTS[interpreter]
+    loopback_ok = await _probe_in_container(runner, target.id, interpreter, script, port, "127.0.0.1")
+    external_ok = await _probe_in_container(runner, target.id, interpreter, script, port, container_ip)
+    if loopback_ok and not external_ok:
+        return (
+            f"the application listens on 127.0.0.1:{port} inside the container, so the "
+            f"published port has nothing to forward to (the container address "
+            f"{container_ip}:{port} refuses connections). Bind the server to 0.0.0.0 "
+            "instead - for example `--host 0.0.0.0`, HOST=0.0.0.0, or app.run(host=\"0.0.0.0\")."
+        )
+    if not loopback_ok and not external_ok:
+        return (
+            f"the process is not accepting HTTP on port {port} at all (neither "
+            f"127.0.0.1 nor {container_ip}). Check the start command and the container logs."
+        )
+    return None
+
+
+async def _probe_in_container(
+    runner, container_id: str, interpreter: str, script: str, port: int, host: str
+) -> bool:
+    command = f'{interpreter} -e "{script}" http://{host}:{port}/' if interpreter == "node" \
+        else f'{interpreter} -c "{script}" http://{host}:{port}/'
+    try:
+        result = await runner.exec_in(container_id, command, timeout=45)
+    except Exception:  # noqa: BLE001
+        return False
+    return result.ok
 
 
 def _session():

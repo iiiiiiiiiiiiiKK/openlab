@@ -259,3 +259,71 @@ async def test_budget_is_consumed_by_client_calls() -> None:
     budget.consume(result)
     with pytest.raises(Exception):
         budget.check()
+
+
+# -- container bind-address diagnosis ---------------------------------------
+
+
+class _FakeContainer:
+    def __init__(self, service: str, cid: str) -> None:
+        self.service = service
+        self.id = cid
+
+
+class _FakeResult:
+    def __init__(self, ok: bool) -> None:
+        self.ok = ok
+
+
+class _FakeRunner:
+    """Answers the two in-container probes the way a real container would."""
+
+    def __init__(self, loopback_ok: bool, external_ok: bool) -> None:
+        self.loopback_ok = loopback_ok
+        self.external_ok = external_ok
+        self.commands: list[str] = []
+
+    async def compose_ps(self, compose_path, project_name):
+        return [_FakeContainer("app", "cid-1")]
+
+    async def container_ip(self, container_id):
+        return "172.18.0.2"
+
+    async def exec_in(self, container, command, on_line=None, timeout=300):
+        self.commands.append(command)
+        return _FakeResult(self.loopback_ok if "127.0.0.1" in command else self.external_ok)
+
+
+async def test_loopback_only_bind_is_diagnosed() -> None:
+    """An app listening on 127.0.0.1 inside a container is unreachable via a published
+    port; the deployment must say so instead of reporting a bare timeout."""
+    from openlab.services.deploy import _diagnose_bind_address
+
+    runner = _FakeRunner(loopback_ok=True, external_ok=False)
+    message = await _diagnose_bind_address(
+        runner, Path("compose.yml"), "proj", {"project_type": "node", "port": 3000}
+    )
+    assert message is not None
+    assert "127.0.0.1:3000" in message
+    assert "0.0.0.0" in message
+    assert "172.18.0.2" in message
+
+
+async def test_reachable_app_produces_no_diagnosis() -> None:
+    from openlab.services.deploy import _diagnose_bind_address
+
+    runner = _FakeRunner(loopback_ok=True, external_ok=True)
+    assert await _diagnose_bind_address(
+        runner, Path("compose.yml"), "proj", {"project_type": "node", "port": 3000}
+    ) is None
+
+
+async def test_dead_port_is_reported_separately() -> None:
+    from openlab.services.deploy import _diagnose_bind_address
+
+    runner = _FakeRunner(loopback_ok=False, external_ok=False)
+    message = await _diagnose_bind_address(
+        runner, Path("compose.yml"), "proj", {"project_type": "python", "port": 8000}
+    )
+    assert message is not None
+    assert "not accepting HTTP" in message

@@ -18,7 +18,7 @@
 [![Tests](https://img.shields.io/badge/tests-206%20passing-3ecf8e.svg)](#测试)
 [![UI](https://img.shields.io/badge/UI-%E4%B8%AD%E6%96%87%20%2F%20English-e0b341.svg)](#界面语言)
 
-**[功能](#功能) · [界面](#界面) · [快速开始](#快速开始) · [架构](#架构) · [v0.1.2 修复](#v012-修复了什么docker-真机验证) · [测试](#测试) · [FAQ](#faq)**
+**[功能](#功能) · [界面](#界面) · [快速开始](#快速开始) · [架构](#架构) · [v0.1.3 修复](#v013-修复了什么发布端口为什么不通) · [测试](#测试) · [FAQ](#faq)**
 
 作者 [**0xkillcoin**](https://x.com/0xkillcoin) · [𝕏](https://x.com/0xkillcoin)
 
@@ -421,6 +421,24 @@ OPENLAB_DATA/
 完整威胁模型见 [`docs/SECURITY.md`](docs/SECURITY.md)。
 
 ---
+
+## v0.1.3 修复了什么（发布端口为什么不通）
+
+容器能构建、能启动、`healthy`，但发布端口始终没响应——原因不在 Docker，在应用本身：
+**容器内绑定 `127.0.0.1` 的服务，只有容器自己能访问**，`docker-proxy` 没有可转发的东西。这是容器化最常见的错误（`next start` 不加 `-H 0.0.0.0`、Flask 默认值、`uvicorn` 不加 `--host`）。
+
+OPENLAB 现在会先在容器内同时探测两个地址，再决定要不要花时间做 AI 修复，并把**精确原因**写进项目状态，而不是一个光秃秃的超时：
+
+```
+the application listens on 127.0.0.1:3000 inside the container, so the published port has
+nothing to forward to (the container address 172.22.0.2:3000 refuses connections).
+Bind the server to 0.0.0.0 instead - for example `--host 0.0.0.0`, HOST=0.0.0.0, or
+app.run(host="0.0.0.0").
+```
+
+端口上根本没有进程在听，会给出另一条不同的说明，两者不会混为一谈。
+
+仓库自带的 fixture 之前绑的就是 `127.0.0.1`，所以在容器里永远跑不起来，已改为 `0.0.0.0`。
 
 ## v0.1.2 修复了什么（Docker 真机验证）
 
