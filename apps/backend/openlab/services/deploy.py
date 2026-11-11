@@ -55,6 +55,10 @@ from engine.task_scheduler.scheduler import TaskContext
 
 log = logging.getLogger("openlab.deploy")
 
+# Directory inside the workspace that holds OPENLAB-generated build files. It must be
+# inside the build context, because Compose resolves `dockerfile` relative to it.
+BUILD_DIR_NAME = ".openlab"
+
 
 @dataclass
 class DeployOutcome:
@@ -164,9 +168,16 @@ async def prepare_environment(
         env_row.confidence = plan.confidence
         env_row.notes = "; ".join(plan.warnings) or None
 
-    # The compose file must be generated relative to the workspace context.
+    # The compose file lives in <project>/docker, but its build context is the
+    # workspace, and Compose resolves `dockerfile` **relative to the context**. A
+    # Dockerfile at <project>/docker/Dockerfile therefore could not be found
+    # ("resolve : CreateFile ...\workspace\docker: cannot find the file"), so the
+    # generated Dockerfile is written inside the workspace instead.
     compose_target_name = "compose.openlab.yml"
-    dockerfile_name = "Dockerfile"
+    dockerfile_dir = workspace_dir / BUILD_DIR_NAME
+    dockerfile_dir.mkdir(parents=True, exist_ok=True)
+    dockerfile_path = dockerfile_dir / "Dockerfile"
+    dockerfile_name = f"{BUILD_DIR_NAME}/Dockerfile"
 
     if plan.strategy == "compose":
         existing = discover_existing_compose(workspace_dir)
@@ -186,19 +197,15 @@ async def prepare_environment(
         else:
             compose_path = await _generate_compose_files(ctx, layout, project_id, plan, settings)
     elif plan.strategy == "dockerfile":
-        write_compose(
-            project_id_dir(layout, project_id),
-            dockerfile_name,
-            build_dockerfile_from_repo(workspace_dir),
-        )
-        await ctx.log(f"using repository Dockerfile -> docker/{dockerfile_name}")
+        dockerfile_path.write_text(build_dockerfile_from_repo(workspace_dir), encoding="utf-8")
+        await ctx.log(f"using repository Dockerfile -> {dockerfile_name}")
         compose_path = await _generate_compose_files(
             ctx, layout, project_id, plan, settings, dockerfile=dockerfile_name
         )
     else:
         generated = generate_dockerfile(plan)
-        write_compose(project_id_dir(layout, project_id), dockerfile_name, generated)
-        await ctx.log(f"generated docker/{dockerfile_name} from the run plan")
+        dockerfile_path.write_text(generated, encoding="utf-8")
+        await ctx.log(f"generated {dockerfile_name} from the run plan")
         compose_path = await _generate_compose_files(
             ctx, layout, project_id, plan, settings, dockerfile=dockerfile_name
         )
@@ -265,6 +272,10 @@ async def _generate_compose_files(
         # The compose file lives in <project>/docker, so the workspace is a sibling.
         build_context=_build_context_relpath(layout, project_id),
         project_key=project_id,
+        # When Docker runs inside a VM (WSL2, a remote engine), a 127.0.0.1 binding
+        # only exists inside that VM. Publishing on the VM address keeps the port
+        # reachable from the machine that started the container.
+        publish_host=getattr(settings, "container_publish_host", None) or "127.0.0.1",
     )
     path = write_compose(layout.project_dir(project_id), "compose.openlab.yml", content)
     await ctx.log(

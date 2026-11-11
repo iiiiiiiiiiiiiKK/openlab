@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     container_pids_limit: int = 512
     container_run_timeout_min: int = 180
     allow_container_network: bool = False
+    # Address the published container port binds to. Loopback is right for a local
+    # Docker engine; when the engine runs inside a VM (WSL2) or on another host a
+    # loopback binding is invisible from here, so this can be set to 0.0.0.0.
+    container_publish_host: str = "127.0.0.1"
     idle_stop_after_min: int = 30
     allow_host_runtime: bool = False
 

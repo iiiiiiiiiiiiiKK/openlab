@@ -118,11 +118,24 @@ async def docker_status(timeout: float = 20) -> DockerStatus:
 
 
 def _version_after(text: str, word: str) -> str | None:
+    """Extract the version token that follows ``word``.
+
+    ``Docker version 29.9.3, build 5457199`` leaves a trailing comma on the token, which
+    then surfaced in the UI as "29.9.3,". Strip surrounding punctuation, not just a
+    leading "v".
+    """
     parts = text.split()
+    candidate: str | None = None
     for index, part in enumerate(parts):
         if part.lower() == word and index + 1 < len(parts):
-            return parts[index + 1].lstrip("v")
-    return parts[-1] if parts else None
+            candidate = parts[index + 1]
+            break
+    if candidate is None and parts:
+        candidate = parts[-1]
+    if not candidate:
+        return None
+    cleaned = candidate.strip().rstrip(",.;")
+    return cleaned.lstrip("v") or None
 
 
 def _install_hint() -> str:

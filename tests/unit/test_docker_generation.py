@@ -65,15 +65,18 @@ def test_generated_compose_has_limits_and_no_host_mounts(tmp_path: Path) -> None
         cpu_limit=2.0,
         memory_limit_mb=4096,
     )
-    assert 'cpus: "2.0"' in text
-    assert "memory: 4096M" in text
+    # Service-level limits: Compose v2 rejects `pids_limit` combined with
+    # `deploy.resources.limits.pids`, which made every generated stack invalid.
+    assert "cpus: 2.0" in text
+    assert "mem_limit: 4096m" in text
     assert "pids_limit: 512" in text
+    assert "deploy:" not in text
     assert "no-new-privileges:true" in text
     assert "- ALL" in text
     assert "127.0.0.1:41500:3000" in text
     assert "docker.sock" not in text
     assert "privileged: true" not in text
-    assert "context: .." in text  # build context is the project folder (workspace copy)
+    assert "context: ../workspace" in text  # build context is the workspace copy
 
 
 def test_compose_includes_extra_services(tmp_path: Path) -> None:

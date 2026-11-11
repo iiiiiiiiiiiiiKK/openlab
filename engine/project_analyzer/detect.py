@@ -72,6 +72,9 @@ MANIFEST_NAMES = (
 )
 
 IGNORED_DIRS = {
+    # OPENLAB writes its generated Dockerfile here (inside the build context). It must
+    # never be mistaken for the repository's own Dockerfile on the next analysis.
+    ".openlab",
     ".git",
     ".hg",
     ".svn",

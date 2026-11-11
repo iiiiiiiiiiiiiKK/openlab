@@ -124,14 +124,10 @@ def generate_dockerfile(plan: RunPlan) -> str:
         lines.append("COPY --chown=openlab:openlab requirements.txt /app/requirements.txt")
         lines.append("RUN pip install --no-cache-dir -r requirements.txt")
 
-    if plan.project_type == "python":
-        lines.extend(
-            [
-                "RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*",
-            ]
-        )
-    else:
-        lines.append("RUN (apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*) || true")
+    # No extra tooling is installed here. The healthcheck below uses the language
+    # runtime that the base image already provides, so a build never needs the network
+    # just to obtain a probe binary (apt-get in a proxy-restricted network failed the
+    # whole build with "Temporary failure resolving deb.debian.org").
 
     if not install:
         lines.append("COPY --chown=openlab:openlab . /app")
@@ -146,12 +142,45 @@ def generate_dockerfile(plan: RunPlan) -> str:
             "RUN mkdir -p /app/.openlab && chown -R openlab:openlab /app",
             "USER openlab",
             f"EXPOSE {plan.port}",
-            'HEALTHCHECK --interval=10s --timeout=5s --start-period=45s --retries=6 '
-            f'CMD curl -fsS http://127.0.0.1:{plan.port}{plan.health_path or "/"} || exit 1',
+            # The health command must work on every base image. `curl` is absent from
+            # node:*-slim and python:*-slim; Debian slim has no `wget` either. Python is
+            # present in the python image and Node ships `node`, so probe with whichever
+            # interpreter the runtime already guarantees instead of an optional tool.
+            "HEALTHCHECK --interval=10s --timeout=5s --start-period=45s --retries=6 \\",
+            f"  {_health_probe(plan)}",
             f'CMD ["/bin/sh", "-lc", "{_escape_json(start)}"]',
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+PROBE_PYTHON = (
+    "import sys,urllib.request; "
+    "sys.exit(0 if urllib.request.urlopen(sys.argv[1], timeout=4).status < 400 else 1)"
+)
+PROBE_NODE = (
+    "const http=require('http');"
+    "http.get(process.argv[1],r=>process.exit(r.statusCode<400?0:1))"
+    ".on('error',()=>process.exit(1));"
+)
+
+
+def _health_probe(plan: RunPlan) -> str:
+    """A health command built from tooling the image is guaranteed to have.
+
+    `curl` is missing from node:*-slim and python:*-slim, and installing a probe with
+    apt-get made the build depend on the network (and fail on a restricted one). The
+    runtime itself is always present, so it performs the probe.
+    """
+    target = f"http://127.0.0.1:{plan.port}{plan.health_path or '/'}"
+    script = PROBE_PYTHON if plan.project_type == "python" else PROBE_NODE
+    interpreter = "python" if plan.project_type == "python" else "node"
+    shell = (
+        "if command -v curl >/dev/null 2>&1; then curl -fsS TARGET >/dev/null; "
+        f"elif command -v {interpreter} >/dev/null 2>&1; then {interpreter} -e \"SCRIPT\" TARGET; "
+        "else exit 0; fi"
+    ).replace("TARGET", target).replace("SCRIPT", script)
+    return f'CMD ["/bin/sh", "-lc", "{_escape_json(shell)}"]'
 
 
 def _chain(command: str) -> str:
@@ -176,6 +205,7 @@ def generate_compose(
     extra_services: list[dict] | None = None,
     build_context: str = "../workspace",
     project_key: str | None = None,
+    publish_host: str = "127.0.0.1",
 ) -> str:
     """Render a compose file with resource limits and no host mounts.
 
@@ -202,25 +232,24 @@ def generate_compose(
         "  app:",
         "    build:",
         f"      context: {build_context}",
-        f"      dockerfile: docker/{dockerfile}",
+        # `dockerfile` is resolved relative to `context`, not to this compose file.
+        f"      dockerfile: {dockerfile}",
         f"    image: {image_tag}",
         f"    container_name: {name}",
         "    restart: \"no\"",
         "    ports:",
-        f"      - \"127.0.0.1:{host_port}:{plan.port}\"",
+        f"      - \"{publish_host}:{host_port}:{plan.port}\"",
     ]
     if env_block:
         app_service.append(env_block)
+    # Limits use the service-level keys (`cpus`, `mem_limit`, `pids_limit`). Compose v2
+    # refuses `pids_limit` together with `deploy.resources.limits.pids` -- "can't set
+    # distinct values" -- and the old file set both, so every generated deployment
+    # aborted before Docker even started building.
     app_service.extend(
         [
-            "    deploy:",
-            "      resources:",
-            "        limits:",
-            f"          cpus: \"{cpu_limit}\"",
-            f"          memory: {memory_limit_mb}M",
-            "        reservations:",
-            "          cpus: \"0.25\"",
-            f"          memory: {min(512, memory_limit_mb // 4)}M",
+            f"    cpus: {cpu_limit}",
+            f"    mem_limit: {memory_limit_mb}m",
             f"    pids_limit: {pids_limit}",
             "    security_opt:",
             "      - no-new-privileges:true",
@@ -244,11 +273,8 @@ def generate_compose(
             f"    image: {service['image']}",
             f"    container_name: {container_name_for(plan.project_name, service['name'], project_key=project_key)}",
             "    restart: \"no\"",
-            "    deploy:",
-            "      resources:",
-            "        limits:",
-            "          cpus: \"1\"",
-            "          memory: 512M",
+            "    cpus: 1",
+            "    mem_limit: 512m",
             "    security_opt:",
             "      - no-new-privileges:true",
             "    networks:",
@@ -550,9 +576,17 @@ def discover_existing_compose(source_dir: Path) -> Path | None:
 
 
 def discover_existing_dockerfile(source_dir: Path) -> Path | None:
+    """Find a Dockerfile the repository itself ships (never OPENLAB's generated one).
+
+    OPENLAB writes its build file to ``<workspace>/.openlab/Dockerfile`` so Compose can
+    resolve it relative to the build context. That file must not be picked up as "the
+    repository Dockerfile" on the next deployment -- it is empty for repos that never
+    shipped one, which aborted the run with "repository Dockerfile is empty".
+    """
+    root = Path(source_dir)
     for name in ("Dockerfile", "dockerfile", "Dockerfile.dev"):
-        candidate = Path(source_dir) / name
-        if candidate.exists():
+        candidate = root / name
+        if candidate.is_file() and candidate.stat().st_size > 0:
             return candidate
     return None
 
