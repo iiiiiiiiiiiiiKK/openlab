@@ -1,7 +1,7 @@
 # OPENLAB — runtime status
 
 ```
-version    : 0.1.1
+version    : 0.1.2
 backend    : http://127.0.0.1:3210 (FastAPI, SQLite/WAL)
 data dir   : <repo>/OPENLAB_DATA
 ```
@@ -10,7 +10,7 @@ data dir   : <repo>/OPENLAB_DATA
 
 | Check | Result |
 | --- | --- |
-| `pytest tests/unit tests/integration -q` | **191 passed, 1 skipped** |
+| `pytest tests/unit tests/integration -q` | **201 passed, 2 skipped** |
 | `pytest -q` (everything, including e2e) | **206 passed, 5 skipped** |
 | `pytest tests/e2e -q -rs` | **6 passed, 2 skipped** (MP4 needs full FFmpeg; Docker compose needs a daemon) |
 | `npx tsc --noEmit` (apps/web) | clean |
@@ -25,7 +25,8 @@ data dir   : <repo>/OPENLAB_DATA
 | --- | --- |
 | Python | 3.11.3 (the code targets 3.12+, 3.11 works too) |
 | Node | 24.22.2 |
-| Docker CLI / daemon | **not installed** — container deployments end in `WAITING_FOR_USER` with that reason |
+| Docker CLI / daemon | **installed and verified** — Docker CLI 29.9.3 against a Docker 26.1.5 engine; a fixture project builds, starts, reports `healthy` and serves HTTP 200 |
+| Docker engine location | this machine ran the engine inside WSL2 (`openlab-test`), reached over `tcp://127.0.0.1:2375` via a `netsh` portproxy. A local Docker Desktop / Engine needs no such bridge |
 | Playwright Chromium | installed (`chromium-1254`) |
 | Playwright FFmpeg | installed (`ffmpeg-1010`) — required for video recording |
 | FFmpeg | Playwright's bundled build (png + libvpx only). GIF works via the frames+Pillow path; MP4 returns 409 naming the missing encoder |
@@ -61,6 +62,27 @@ assets: 8 screenshots   report: VERIFIED
 The generated project folder contained real artefacts — `screenshots/preview-desktop.png` (1440×900),
 `screenshots/step-00-goto.png`, `reports/report-v1.{md,html,json}` — and the report rendered them with
 the observed HTTP status, the step table and the console/network error summary.
+
+## Fixed in 0.1.2 — Docker deployment verified against a real engine
+
+0.1.1 was validated without a Docker daemon, so the container path was reviewed but never executed.
+Running it for real surfaced five defects that made every container deployment fail:
+
+| Defect | Fix |
+| --- | --- |
+| Generated compose set `pids_limit` **and** `deploy.resources.limits`; Compose v2 rejects that pair ("can't set distinct values on 'pids_limit' and 'deploy.resources.limits.pids'") | limits use the service-level keys `cpus` / `mem_limit` / `pids_limit` |
+| `dockerfile: docker/Dockerfile` is resolved **relative to the build context**, which is the workspace — Docker said `CreateFile …\workspace\docker: cannot find the file` | the generated Dockerfile is written to `<workspace>/.openlab/Dockerfile` and referenced from there |
+| The next analysis then treated that generated file as "the repository Dockerfile" and aborted with `repository Dockerfile is empty` | `.openlab` is an ignored scan directory and discovery only accepts non-empty repository Dockerfiles |
+| The healthcheck ran `curl`, absent from `node:*-slim` and `python:*-slim`, so healthy containers were `unhealthy` and the project never reached `RUNNING` | the probe uses the runtime the image already ships (node / python), with curl/wget as an optional fast path |
+| Installing that probe via `apt-get` made the build depend on the network and fail with `Temporary failure resolving deb.debian.org` | nothing is installed at build time |
+
+Also:
+
+* `OPENLAB_CONTAINER_PUBLISH_HOST` controls the bind address of published ports. Loopback is correct for a local engine; when the engine lives in a VM (WSL2) or on another host, a loopback binding is not reachable from this machine.
+* `docker --version` output (`29.9.3, build …`) no longer leaks the trailing comma into the UI.
+* A root `package-lock.json` produced by installing the workspace root is ignored.
+
+Verified end to end on this host: fixture import → `docker compose up --build` → container `healthy` → app answers HTTP 200 inside the container → report generated.
 
 ## Fixed in 0.1.1 — evidence-integrity and correctness pass
 

@@ -18,7 +18,7 @@
 [![Tests](https://img.shields.io/badge/tests-206%20passing-3ecf8e.svg)](#测试)
 [![UI](https://img.shields.io/badge/UI-%E4%B8%AD%E6%96%87%20%2F%20English-e0b341.svg)](#界面语言)
 
-**[功能](#功能) · [界面](#界面) · [快速开始](#快速开始) · [架构](#架构) · [v0.1.1 修复](#v011-修复了什么) · [测试](#测试) · [FAQ](#faq)**
+**[功能](#功能) · [界面](#界面) · [快速开始](#快速开始) · [架构](#架构) · [v0.1.2 修复](#v012-修复了什么docker-真机验证) · [测试](#测试) · [FAQ](#faq)**
 
 作者 [**0xkillcoin**](https://x.com/0xkillcoin) · [𝕏](https://x.com/0xkillcoin)
 
@@ -231,7 +231,7 @@ privileged: false
 | Python | 3.12+ | 后端（必需） |
 | Node.js | 18+ | 构建前端 / 桌面端 |
 | **Docker** | Desktop 或 Engine | **部署项目必需**（强烈推荐） |
-| Playwright Chromium | 脚本自动安装 | 预览、截图、探索 |
+| Playwright Chromium **+ ffmpeg** | `python -m playwright install chromium ffmpeg` | 预览、截图、探索、录屏（ffmpeg 缺了会让整个浏览器会话断开） |
 | FFmpeg | 任意近期版本 | MP4 / GIF 导出（Playwright 自带精简版） |
 | Rust | 1.77+ | 仅打包桌面安装包需要 |
 
@@ -421,6 +421,26 @@ OPENLAB_DATA/
 完整威胁模型见 [`docs/SECURITY.md`](docs/SECURITY.md)。
 
 ---
+
+## v0.1.2 修复了什么（Docker 真机验证）
+
+0.1.1 是在**没有 Docker 守护进程**的机器上完成的，容器路径只做了代码审查，没有真正跑过。真跑之后发现五个让容器部署 100% 失败的缺陷：
+
+| 缺陷 | 修复 |
+| --- | --- |
+| 生成的 compose 同时写了 `pids_limit` 和 `deploy.resources.limits`，Compose v2 直接拒绝 | 改用服务级 `cpus` / `mem_limit` / `pids_limit` |
+| `dockerfile: docker/Dockerfile` 是**相对构建上下文**解析的，而上下文是 workspace，Docker 报 `CreateFile …\workspace\docker: cannot find the file` | 生成的 Dockerfile 写到 `<workspace>/.openlab/Dockerfile`，并按这个路径引用 |
+| 下一轮分析把那个生成的文件当成「仓库自带 Dockerfile」，直接报 `repository Dockerfile is empty` | `.openlab` 加入扫描忽略目录；只接受**非空**的仓库 Dockerfile |
+| 健康检查用 `curl`，而 `node:*-slim` / `python:*-slim` 里没有它，容器明明是健康的却被标成 `unhealthy`，项目永远到不了 `RUNNING` | 用镜像本来就有的运行时探测（node / python），curl/wget 只作为可选快路径 |
+| 为了装这个探测工具又加了 `apt-get`，构建因此依赖外网，在受限网络下失败 | 构建期不安装任何包 |
+
+另外：
+
+* 新增 `OPENLAB_CONTAINER_PUBLISH_HOST`，控制容器端口绑定地址。本机 Docker 用 `127.0.0.1` 是对的；Docker 跑在 VM（WSL2）或另一台机器上时，回环绑定在本机根本不可达。
+* `docker --version` 输出里的逗号不再漏进界面（之前显示 `29.9.3,`）。
+* workspace 根目录被 npm 生成的 `package-lock.json` 不再进版本库。
+
+本机实测链路：导入 fixture → `docker compose up --build` → 容器 `healthy` → 容器内应用 HTTP 200 → 报告生成。
 
 ## v0.1.1 修复了什么
 
